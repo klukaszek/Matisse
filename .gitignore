@@ -14,6 +14,7 @@ Dataset/NTIRE2022_original/
 Dataset/NTIRE_CROPPED_*
 Dataset/NTIRE_*
 Dataset/ColorPatch_*
+Dataset/ARAD_*
 evaluate/
 assets/cell_position/data/*_4000.cpkl
 

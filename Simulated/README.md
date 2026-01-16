@@ -79,16 +79,12 @@ Simulated/
    - Multiple optimizers for different param groups
    - Masked losses
 
-## Key Differences from PyTorch Implementation
+## Key Differences from PyTorch
+
+Matisse JAX is a ground-up reimplementation focused on functional purity and performance.
 
 ### 1. Random Number Generation
-
-**PyTorch:**
-```python
-noise = torch.randn_like(x)
-```
-
-**JAX:**
+JAX uses explicit PRNG state management, unlike PyTorch's global state.
 ```python
 key = jax.random.PRNGKey(0)
 key, subkey = jax.random.split(key)
@@ -96,59 +92,25 @@ noise = jax.random.normal(subkey, shape=x.shape)
 ```
 
 ### 2. Module Definition
-
-**PyTorch:**
-```python
-class MyModule(nn.Module):
-    def __init__(self):
-        super().__init__()
-        self.linear = nn.Linear(10, 10)
-
-    def forward(self, x):
-        return self.linear(x)
-```
-
-**Equinox:**
+We use **Equinox**, which treats modules as PyTrees. This makes them compatible with all JAX transformations (`jit`, `grad`, `vmap`).
 ```python
 class MyModule(eqx.Module):
     linear: eqx.nn.Linear
-
     def __init__(self, *, key):
         self.linear = eqx.nn.Linear(10, 10, key=key)
-
     def __call__(self, x):
         return self.linear(x)
 ```
 
-### 3. Complex-Valued Parameters
-
-**PyTorch:**
+### 3. Complex Numbers
+JAX has native complex number support, eliminating the need for `view_as_complex`.
 ```python
-complex_param = torch.view_as_complex(
-    torch.stack([real_part, imag_part], dim=-1)
-)
+complex_param = real + 1j * imag
 ```
 
-**JAX:**
-```python
-complex_param = jnp.array([...], dtype=jnp.complex64)
-# Native complex number support
-```
+### 4. Data Pipeline
+The pipeline is fully JAX-focused using **Google Grain** and **NumPy** (`.npy`) for storage, ensuring zero dependency on PyTorch for training.
 
-### 4. FFT Operations
-
-**PyTorch:**
-```python
-x_fft = torch.fft.fft2(x)
-x_shift = torch.fft.fftshift(x_fft)
-```
-
-**JAX:**
-```python
-x_fft = jnp.fft.fft2(x)
-x_shift = jnp.fft.fftshift(x_fft)
-```
-(Nearly identical!)
 
 ### 5. Grid Sampling
 

@@ -8,17 +8,27 @@ import os
 import time
 from tqdm.auto import tqdm
 from typing import Tuple, Dict, Any, NamedTuple
+import resource
+
+# Increase file descriptor limit for Grain multi-processing
+try:
+    soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+    resource.setrlimit(resource.RLIMIT_NOFILE, (hard, hard))
+except Exception as e:
+    print(f"Warning: Could not increase file descriptor limit: {e}")
 
 from Simulated.Retina import RetinaModel
 from Simulated.Cortex import CortexModel
 from Dataset import create_dataset
 from Dataset.NTIRE import create_dataloader
 
+
 # Define a container for the three optimizer states
 class OptimizerStates(NamedTuple):
     main: optax.OptState
     ns_cm: optax.OptState
     ns_ip: optax.OptState
+
 
 def create_optimizers(
     learning_rate: float = 1e-3
@@ -28,6 +38,13 @@ def create_optimizers(
     ns_cm_optimizer = optax.adam(learning_rate)
     ns_ip_optimizer = optax.adam(learning_rate)
     return main_optimizer, ns_cm_optimizer, ns_ip_optimizer
+
+
+@eqx.filter_jit
+def retina_forward(model: RetinaModel, x: jax.Array, key: jax.Array) -> Tuple:
+    """JIT-compiled forward pass for the fixed retina model."""
+    return model(x, key=key)
+
 
 @eqx.filter_jit
 def train_step(
@@ -91,16 +108,21 @@ def train_step(
     
     return cortex, new_opt_states, losses
 
+
 def train_cortical_model(
     params: Dict[str, Any],
     checkpoint_dir: str = None,
     resume_from: str = None,
-    num_workers: int = 4
+    num_workers: int = None
 ):
     """Main training loop for cortical model."""
+    if num_workers is None:
+        num_workers = os.cpu_count() or 4
+
     print("="*70)
     print("JAX/Equinox/Optax Training - Matisse Cortical Model (Optimized with Orbax)")
     print("="*70)
+
 
     experiment_name = params['Experiment']['name']
     root_dir = params.get('root_dir', os.path.dirname(os.path.abspath(__file__)))
@@ -234,8 +256,8 @@ def train_cortical_model(
 
             # Retina Forward (no grad)
             key, subkey = jax.random.split(key)
-            batch_ons, batch_true_dxy, batch_warped_LMS_current_FoV = retina(
-                batch_LMS_full, key=subkey
+            batch_ons, batch_true_dxy, batch_warped_LMS_current_FoV = retina_forward(
+                retina, batch_LMS_full, key=subkey
             )
 
             # Slicing
@@ -300,7 +322,7 @@ if __name__ == '__main__':
     parser.add_argument('-f', '--config_filename', default='Default/LMS')
     parser.add_argument('--checkpoint_dir', default=None)
     parser.add_argument('--resume_from', default=None)
-    parser.add_argument('--num_workers', type=int, default=4)
+    parser.add_argument('--num_workers', type=int, default=None)
     args = parser.parse_args()
 
     root_dir = os.path.dirname(os.path.abspath(__file__))

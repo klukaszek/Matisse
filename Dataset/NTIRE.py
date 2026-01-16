@@ -9,6 +9,8 @@ import grain.python as pygrain
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 from dataclasses import dataclass
+import scipy.ndimage
+import h5py
 
 from Dataset.Abstract import GrainDataset
 from Dataset import register_class
@@ -133,7 +135,7 @@ class NTIRE(GrainDataset):
         data_dir = f'{root_dir}/Dataset/ARAD_{dim_image}_{dataset_type}/LMS/data'
         existing_files = []
         if os.path.exists(data_dir):
-            existing_files = [f for f in os.listdir(data_dir) if f.endswith('.pt')]
+            existing_files = [f for f in os.listdir(data_dir) if f.endswith('.npy')]
 
         if len(existing_files) == 0:
             print(f'=== Preprocessing {self.source_dataset} hyperspectral data... ===')
@@ -146,7 +148,7 @@ class NTIRE(GrainDataset):
                 )
             else:
                 # First interpolate if needed
-                interpolated_check = f'{root_dir}/Dataset/NTIRE2022_interpolated/data/0899.pt'
+                interpolated_check = f'{root_dir}/Dataset/NTIRE2022_interpolated/data/0899.npy'
                 if not os.path.exists(interpolated_check):
                     print('=== Spectrally interpolating NTIRE hyperspectral data... ===')
                     interpolate_NTIRE_hyperspectral_data(root_dir)
@@ -160,11 +162,11 @@ class NTIRE(GrainDataset):
         # Store dataset path
         self.data_dir = f'{root_dir}/Dataset/ARAD_{dim_image}_{dataset_type}/LMS/data'
 
-        # Cache file list (use all existing files, like PyTorch DatasetFolder)
+        # Cache file list
         self.file_list = sorted([
             os.path.join(self.data_dir, f)
             for f in os.listdir(self.data_dir)
-            if f.endswith('.pt')
+            if f.endswith('.npy')
         ])
         self.dataset_size = len(self.file_list)
 
@@ -173,7 +175,7 @@ class NTIRE(GrainDataset):
 
         print(f'Dataset ready: {len(self.file_list)} samples')
 
-    def __getitem__(self, index: int) -> jnp.ndarray:
+    def __getitem__(self, index) -> jnp.ndarray:
         """Get a single LMS image.
 
         Args:
@@ -185,13 +187,8 @@ class NTIRE(GrainDataset):
         index = index % len(self.file_list)
         file_path = self.file_list[index]
 
-        # Load using pickle (PyTorch tensors saved with torch.save)
-        with open(file_path, 'rb') as f:
-            import torch
-            data = torch.load(f, map_location='cpu', weights_only=True)
-
-        # Convert to JAX array
-        data_np = data.numpy()
+        # Load using numpy
+        data_np = np.load(file_path)
         return jnp.array(data_np)
 
     def __len__(self) -> int:
@@ -252,10 +249,10 @@ def create_dataloader(
         data_source=dataset,
         sampler=sampler,
         worker_count=num_workers,
-        worker_buffer_size=2,
+        worker_buffer_size=4,
         read_options=pygrain.ReadOptions(
             num_threads=1,
-            prefetch_buffer_size=batch_size * 2
+            prefetch_buffer_size=batch_size * 8
         ),
         operations=operations
     )
@@ -269,15 +266,12 @@ def interpolate_NTIRE_hyperspectral_data(root_dir: str):
     Args:
         root_dir: Root directory containing the dataset
     """
-    import h5py
-    import torch
-
     os.makedirs(f'{root_dir}/Dataset/NTIRE2022_interpolated/data', exist_ok=True)
     data_folder = f'{root_dir}/Dataset/NTIRE2022_original/data'
 
     def interpolate(index):
         if os.path.exists(f'{data_folder}/ARAD_1K_{index:04d}.mat'):
-            if not os.path.exists(f'{root_dir}/Dataset/NTIRE2022_interpolated/data/{index:04d}.pt'):
+            if not os.path.exists(f'{root_dir}/Dataset/NTIRE2022_interpolated/data/{index:04d}.npy'):
                 # Load mat file
                 mat_contents = h5py.File(f'{data_folder}/ARAD_1K_{index:04d}.mat', 'r')
 
@@ -294,10 +288,10 @@ def interpolate_NTIRE_hyperspectral_data(root_dir: str):
 
                 new_cube.append(cube[-1])
                 new_cube = np.asarray(new_cube)
-                new_cube = torch.FloatTensor(new_cube)
-                new_cube = new_cube.permute(2, 1, 0)
+                # Transpose to (H, W, C)
+                new_cube = np.transpose(new_cube, (2, 1, 0))
 
-                torch.save(new_cube, f'{root_dir}/Dataset/NTIRE2022_interpolated/data/{index:04d}.pt')
+                np.save(f'{root_dir}/Dataset/NTIRE2022_interpolated/data/{index:04d}.npy', new_cube)
 
     with ThreadPoolExecutor(max_workers=os.cpu_count()) as executor:
         _ = [executor.submit(interpolate, i) for i in range(1, 1001)]
@@ -323,10 +317,6 @@ def preprocess_ARAD_hyperspectral_data(
         root_dir: Root directory
         dataset_size: Number of crops to generate (e.g., 50000)
     """
-    import torch
-    import torch.nn.functional as F
-    import h5py
-
     # Get white point (convert to numpy)
     defined_white_point = np.array(CST.white_point)
     cone_fundamentals_np = np.array(CST.cone_fundamentals)
@@ -347,7 +337,7 @@ def preprocess_ARAD_hyperspectral_data(
     # Step 1: Convert hyperspectral to LMS
     def hyperspectral_cube_to_lms(index):
         """Convert a single ARAD hyperspectral cube to LMS."""
-        output_path = f'{root_dir}/Dataset/ARAD_{dim_image}_{dataset_type}/full_LMS/data/{index}.pt'
+        output_path = f'{root_dir}/Dataset/ARAD_{dim_image}_{dataset_type}/full_LMS/data/{index}.npy'
         if os.path.exists(output_path):
             return  # Already processed
 
@@ -372,16 +362,10 @@ def preprocess_ARAD_hyperspectral_data(
 
             if bands == 31:
                 # Interpolate to 301 bands
-                cube_torch = torch.from_numpy(cube).float()
-                # Reshape for interpolation: (H*W, 31) -> (H*W, 1, 31) -> (H*W, 1, 301)
-                cube_flat = cube_torch.reshape(-1, 31)
-                cube_interp = F.interpolate(
-                    cube_flat.unsqueeze(1),
-                    size=301,
-                    mode='linear',
-                    align_corners=True
-                )
-                cube = cube_interp.squeeze(1).reshape(H, W, 301).numpy()
+                # Use scipy.ndimage.zoom for interpolation
+                # Zoom factors: (1, 1, 301/31)
+                zoom_factor = (1, 1, 301 / 31)
+                cube = scipy.ndimage.zoom(cube, zoom_factor, order=1)  # Linear interpolation
 
             # Convert to LMS: (H, W, 301) @ (301, 4) = (H, W, 4)
             lms_np = np.matmul(cube, cone_fundamentals_np)
@@ -394,11 +378,10 @@ def preprocess_ARAD_hyperspectral_data(
                     multiplier = dim_image / W
                 nH, nW = int(np.ceil(H * multiplier)), int(np.ceil(W * multiplier))
 
-                lms_torch = torch.from_numpy(lms_np).permute(2, 0, 1).unsqueeze(0)
-                lms_torch = F.interpolate(
-                    lms_torch, size=(nH, nW), mode='bilinear', align_corners=False
-                )
-                lms_np = lms_torch.squeeze().permute(1, 2, 0).numpy()
+                # Use scipy.ndimage.zoom for spatial resizing
+                zoom_h = nH / H
+                zoom_w = nW / W
+                lms_np = scipy.ndimage.zoom(lms_np, (zoom_h, zoom_w, 1), order=1)
 
             # White world white balance
             current_white_point = lms_np.reshape(-1, lms_np.shape[-1]).max(0) + 1e-10
@@ -406,13 +389,12 @@ def preprocess_ARAD_hyperspectral_data(
             lms_np *= defined_white_point
 
             # Save
-            lms_save = torch.from_numpy(lms_np.astype(np.float32))
-            torch.save(lms_save, output_path)
+            np.save(output_path, lms_np.astype(np.float32))
 
         except Exception as e:
             print(f"\n⚠️  Skipping corrupted file {arad_files[index]}: {e}")
             # Create a dummy file to mark it as processed (will skip in cropping)
-            torch.save(torch.zeros(1, 1, 4), output_path)
+            np.save(output_path, np.zeros((1, 1, 4), dtype=np.float32))
 
     print('\n[1/2] Converting hyperspectral data to LMS...')
     with ThreadPoolExecutor(max_workers=os.cpu_count()) as executor:
@@ -430,18 +412,16 @@ def preprocess_ARAD_hyperspectral_data(
         source_index = crop_index % len(arad_files)
 
         # Load full LMS image
-        lms = torch.load(
-            f'{root_dir}/Dataset/ARAD_{dim_image}_{dataset_type}/full_LMS/data/{source_index}.pt',
-            weights_only=True
+        lms = np.load(
+            f'{root_dir}/Dataset/ARAD_{dim_image}_{dataset_type}/full_LMS/data/{source_index}.npy'
         )
 
         # Skip if this is a dummy file (from corrupted source)
         if lms.shape[0] == 1 and lms.shape[1] == 1:
             # Try next image
             source_index = (source_index + 1) % len(arad_files)
-            lms = torch.load(
-                f'{root_dir}/Dataset/ARAD_{dim_image}_{dataset_type}/full_LMS/data/{source_index}.pt',
-                weights_only=True
+            lms = np.load(
+                f'{root_dir}/Dataset/ARAD_{dim_image}_{dataset_type}/full_LMS/data/{source_index}.npy'
             )
 
         H, W = lms.shape[0], lms.shape[1]
@@ -469,9 +449,9 @@ def preprocess_ARAD_hyperspectral_data(
         lms_crop = lms[x:x + dim_image, y:y + dim_image]
 
         # Save
-        torch.save(
-            lms_crop,
-            f'{root_dir}/Dataset/ARAD_{dim_image}_{dataset_type}/LMS/data/{crop_index}.pt'
+        np.save(
+            f'{root_dir}/Dataset/ARAD_{dim_image}_{dataset_type}/LMS/data/{crop_index}.npy',
+            lms_crop
         )
 
     print('\n[2/2] Generating random crops...')
@@ -502,9 +482,6 @@ def preprocess_NTIRE_hyperspectral_data(
         root_dir: Root directory
         dataset_size: Number of samples to generate
     """
-    import torch
-    import torch.nn.functional as F
-
     # Get white point (convert to numpy)
     defined_white_point = np.array(CST.white_point)
 
@@ -513,20 +490,19 @@ def preprocess_NTIRE_hyperspectral_data(
 
     # Load all interpolated data
     interpolated_dir = f'{root_dir}/Dataset/NTIRE2022_interpolated/data'
-    file_list = sorted([f for f in os.listdir(interpolated_dir) if f.endswith('.pt')])
+    file_list = sorted([f for f in os.listdir(interpolated_dir) if f.endswith('.npy')])
 
     # Convert hyperspectral to LMS
     def hyperspectral_cube_to_lms(index):
-        if not os.path.exists(f'{root_dir}/Dataset/NTIRE_{dim_image}_{dataset_type}/full_LMS/data/{index}.pt'):
+        if not os.path.exists(f'{root_dir}/Dataset/NTIRE_{dim_image}_{dataset_type}/full_LMS/data/{index}.npy'):
             file_path = os.path.join(interpolated_dir, file_list[index])
-            cube = torch.load(file_path, weights_only=True, map_location='cpu')
+            cube = np.load(file_path)
 
             # Convert to numpy for processing
-            cube_np = cube.numpy()
             cone_fundamentals_np = np.array(CST.cone_fundamentals)
 
             # Matrix multiply: (H, W, 301) @ (301, 4) = (H, W, 4)
-            lms_np = np.matmul(cube_np, cone_fundamentals_np)
+            lms_np = np.matmul(cube, cone_fundamentals_np)
 
             H, W, _ = lms_np.shape
             if H < dim_image or W < dim_image:
@@ -537,21 +513,18 @@ def preprocess_NTIRE_hyperspectral_data(
                     multiplier = dim_image / W
                 nH, nW = int(np.ceil(H * multiplier)), int(np.ceil(W * multiplier))
 
-                # Use torch for interpolation
-                lms_torch = torch.from_numpy(lms_np).permute(2, 0, 1).unsqueeze(0)
-                lms_torch = F.interpolate(
-                    lms_torch, size=(nH, nW), mode='bilinear', align_corners=False
-                )
-                lms_np = lms_torch.squeeze().permute(1, 2, 0).numpy()
+                # Use scipy.ndimage.zoom
+                zoom_h = nH / H
+                zoom_w = nW / W
+                lms_np = scipy.ndimage.zoom(lms_np, (zoom_h, zoom_w, 1), order=1)
 
             # White world white balance
             current_white_point = lms_np.reshape(-1, lms_np.shape[-1]).max(0) + 1e-10
             lms_np = lms_np / current_white_point[None, None, :]
             lms_np *= defined_white_point
 
-            # Save as PyTorch tensor for compatibility
-            lms_save = torch.from_numpy(lms_np)
-            torch.save(lms_save, f'{root_dir}/Dataset/NTIRE_{dim_image}_{dataset_type}/full_LMS/data/{index}.pt')
+            # Save
+            np.save(f'{root_dir}/Dataset/NTIRE_{dim_image}_{dataset_type}/full_LMS/data/{index}.npy', lms_np.astype(np.float32))
 
     print('First, converting hyperspectral data to LMS...')
     with ThreadPoolExecutor(max_workers=os.cpu_count()) as executor:
@@ -563,9 +536,8 @@ def preprocess_NTIRE_hyperspectral_data(
         if index % 1000 == 0:
             print(f'{index} / {dataset_size}')
         i = index % len(file_list)
-        lms = torch.load(
-            f'{root_dir}/Dataset/NTIRE_{dim_image}_{dataset_type}/full_LMS/data/{i}.pt',
-            weights_only=True
+        lms = np.load(
+            f'{root_dir}/Dataset/NTIRE_{dim_image}_{dataset_type}/full_LMS/data/{i}.npy'
         )
 
         W, H = lms.shape[0], lms.shape[1]
@@ -589,7 +561,7 @@ def preprocess_NTIRE_hyperspectral_data(
                 raise ValueError('Hyperspectral image smaller than required resolution')
 
         lms = lms[x:x + dim_image, y:y + dim_image]
-        torch.save(lms, f'{root_dir}/Dataset/NTIRE_{dim_image}_{dataset_type}/LMS/data/{index}.pt')
+        np.save(f'{root_dir}/Dataset/NTIRE_{dim_image}_{dataset_type}/LMS/data/{index}.npy', lms)
 
     print('Next, cropping the images...')
     with ThreadPoolExecutor(max_workers=os.cpu_count()) as executor:

@@ -173,7 +173,7 @@ The dataset is automatically prepared on first use:
 
 ### File Format
 
-Data is stored as PyTorch tensors (`.pt` files) for compatibility:
+Data is stored as NumPy arrays (`.npy` files) for native JAX compatibility:
 - Each file contains a single LMS image
 - Shape: `(H, W, 4)` where channels are [L, M, S, Q] (Q=0 for trichromatic)
 - Format: Float32, range approximately [0, 1]
@@ -201,10 +201,11 @@ This tests:
 
 ## Differences from PyTorch
 
-| Feature | PyTorch | Grain |
-|---------|---------|-------|
+| Feature | PyTorch | JAX/Grain |
+|---------|---------|-----------|
 | Base class | `torch.utils.data.Dataset` | `pygrain.RandomAccessDataSource` |
 | DataLoader | `DataLoader` | `pygrain.DataLoader` |
+| File Format | `.pt` (Pickle) | `.npy` (NumPy/JAX) |
 | Shuffling | Per-epoch | Continuous with seed |
 | Batching | Built-in | Via operations |
 | Workers | Process-based | Thread-based |

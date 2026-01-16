@@ -28,7 +28,7 @@ class GrainDataset(pygrain.RandomAccessDataSource, ABC):
         pass
 
     @abstractmethod
-    def __getitem__(self, index: int) -> Any:
+    def __getitem__(self, index) -> Any:
         """Get a single sample from the dataset.
 
         Args:
