@@ -17,8 +17,7 @@ Dataset/ColorPatch_*
 evaluate/
 assets/cell_position/data/*_4000.cpkl
 
-Experiment/LearnedWeights/LMS
-Experiment/LearnedWeights/Sandbox
+Experiment/LearnedWeights/
 
 Tutorials/data/LP/
 Assets/cell_position/data/*_4000.cpkl
@@ -36,3 +35,9 @@ Tutorials/RetinaSimulation/Results
 
 Dataset/FullColors*
 Dataset/HueSphere*
+
+# Large dataset files
+Dataset/ARAD_1K_Mirror/
+Dataset/ARAD_*_LMS/
+*.mat
+*.zip

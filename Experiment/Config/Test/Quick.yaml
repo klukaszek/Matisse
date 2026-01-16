@@ -1,0 +1,20 @@
+CortexModel:
+  latent_dim: 8
+Dataset:
+  batch_size: 8
+  dataset_name: NTIRE
+  size: 10000
+Experiment:
+  name: JAX_LMS_Test
+  simulating_tetra: false
+  timesteps_per_image: 2
+RetinaModel:
+  max_shift_size: 15
+  retina_spatial_sampling:
+    cone_distribution: Human
+  retina_spectral_sampling:
+    cone_types: LMS
+  simulation_size: 256
+Training:
+  learning_rate: 0.001
+  max_gradient_updates: 10

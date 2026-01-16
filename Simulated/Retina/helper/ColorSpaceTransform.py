@@ -22,7 +22,7 @@ class ColorSpaceTransform():
         CIEXYZ = np.asarray(CIEXYZ)
         self.CIEXYZ = torch.FloatTensor(CIEXYZ).to(self.device)
 
-        self.CIEXYZ_to_LMS_matrix = torch.linalg.inv(self.CIEXYZ.T @ self.CIEXYZ) @ self.CIEXYZ.T @ self.cone_fundamentals
+        self.CIEXYZ_to_LMS_matrix = torch.linalg.inv((self.CIEXYZ.T @ self.CIEXYZ).contiguous()) @ self.CIEXYZ.T @ self.cone_fundamentals
         self.CIEXYZ_to_LMS_matrix = self.CIEXYZ_to_LMS_matrix.to(self.device)
         
         # assumes D65 illuminant
@@ -39,7 +39,7 @@ class ColorSpaceTransform():
 
         # if not tetrachromatic
         if not self.is_tetrachromatic:
-            self.LMS_to_linsRGB_matrix = torch.linalg.inv(self.linsRGB_to_LMS_matrix[:, :3])
+            self.LMS_to_linsRGB_matrix = torch.linalg.inv(self.linsRGB_to_LMS_matrix[:, :3].contiguous())
             if self.device == 'mps:0': # MPS incorrectly handles the inverse of a matrix
                 self.LMS_to_linsRGB_matrix = self.LMS_to_linsRGB_matrix.T
             # pad with zeros (3x3 -> 4x3 matrix)
