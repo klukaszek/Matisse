@@ -1,4 +1,4 @@
-"""SimulatedJAX: JAX/Equinox/Penzai implementation of Matisse retina simulation.
+"""Simulated: JAX/Equinox/Penzai implementation of Matisse retina simulation.
 
 This package provides a JAX reimplementation of the Matisse model with:
 - Equinox for PyTorch-like neural network API
@@ -14,7 +14,7 @@ Modules:
 Example:
 --------
 >>> import jax
->>> from SimulatedJAX.Cortex.D_demosaicing import UNet
+>>> from Simulated.Cortex.D_demosaicing import UNet
 >>>
 >>> key = jax.random.PRNGKey(42)
 >>> model = UNet(dim_latent=8, key=key)

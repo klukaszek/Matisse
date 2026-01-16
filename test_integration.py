@@ -4,8 +4,8 @@ import jax.numpy as jnp
 import sys
 sys.path.append('.')
 
-from SimulatedJAX.Cortex import CortexModel
-from SimulatedJAX.Retina import RetinaModel
+from Simulated.Cortex import CortexModel
+from Simulated.Retina import RetinaModel
 
 
 def test_cortex_model():

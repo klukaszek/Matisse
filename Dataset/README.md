@@ -16,7 +16,7 @@ The pipeline has been ported from PyTorch's `torch.utils.data.DataLoader` to Goo
 ## Structure
 
 ```
-DatasetJAX/
+Dataset/
 ├── __init__.py          # Registry and dataset factory
 ├── Abstract.py          # Base class for all datasets
 ├── NTIRE.py             # NTIRE hyperspectral dataset
@@ -29,9 +29,9 @@ DatasetJAX/
 
 ```python
 import jax
-from SimulatedJAX.Retina import RetinaModel
-from DatasetJAX import create_dataset
-from DatasetJAX.NTIRE import create_dataloader
+from Simulated.Retina import RetinaModel
+from Dataset import create_dataset
+from Dataset.NTIRE import create_dataloader
 
 # Initialize retina model
 retina = RetinaModel(simulation_size=256, timesteps_per_image=8)
@@ -70,10 +70,10 @@ for batch_LMS_full_field in loader:
 import jax
 import optax
 import equinox as eqx
-from SimulatedJAX.Cortex import CortexModel
-from SimulatedJAX.Retina import RetinaModel
-from DatasetJAX import create_dataset
-from DatasetJAX.NTIRE import create_dataloader
+from Simulated.Cortex import CortexModel
+from Simulated.Retina import RetinaModel
+from Dataset import create_dataset
+from Dataset.NTIRE import create_dataloader
 
 # Initialize models
 key = jax.random.PRNGKey(0)
@@ -126,8 +126,8 @@ for epoch in range(num_epochs):
 To create a custom dataset, inherit from `GrainDataset`:
 
 ```python
-from DatasetJAX.Abstract import GrainDataset
-from DatasetJAX import register_class
+from Dataset.Abstract import GrainDataset
+from Dataset import register_class
 import jax.numpy as jnp
 
 @register_class("MyDataset")

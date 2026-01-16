@@ -1,17 +1,26 @@
-# This python script is based on the matlab code from http://www.neitzvision.com/img/research/spectsens.m
+"""JAX implementation of cone fundamentals generation.
 
+Based on the matlab code from http://www.neitzvision.com/img/research/spectsens.m
+"""
+import jax.numpy as jnp
 import numpy as np
-import matplotlib.pyplot as plt
 from scipy.interpolate import CubicSpline
-from scipy.io import savemat, loadmat
-
+from scipy.io import loadmat
 import os
-import sys
 
-sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
-from root_config import ROOT_DIR
 
 def generate_sensitivity_curve(lambda_max=559, OD=0.30, output='alog', spectrum=None):
+    """Generate cone sensitivity curve for a given peak wavelength.
+
+    Args:
+        lambda_max: Peak wavelength in nanometers
+        OD: Optical density
+        output: 'log' or 'alog' (antilog)
+        spectrum: Wavelength range (default: 400-700nm)
+
+    Returns:
+        Sensitivity curve as numpy array
+    """
     if spectrum is None:
         spectrum = np.arange(400, 701)
 
@@ -47,29 +56,60 @@ def generate_sensitivity_curve(lambda_max=559, OD=0.30, output='alog', spectrum=
         return 10 ** OD_temp
 
 
-def generate_lens_transmit(lambdas):
-    # load the matlab file
-    lens_data = loadmat(f"{ROOT_DIR}/Simulated/Retina/SS_spectral_sampling/helper/data/den_lens_ssf.mat")
+def generate_lens_transmit(lambdas, root_dir=None):
+    """Generate lens transmittance function.
+
+    Args:
+        lambdas: Wavelength array
+        root_dir: Root directory path (for loading lens data)
+
+    Returns:
+        Lens transmittance as numpy array
+    """
+    if root_dir is None:
+        # Try to find the data file relative to this file
+        current_dir = os.path.dirname(os.path.abspath(__file__))
+        # Fallback relative path (assuming Assets is at project root, this might be tricky if not running from root)
+        # Better to rely on root_dir being passed correctly in JAX implementation
+        data_path = os.path.join(current_dir, "../../../../Assets/Retina/den_lens_ssf.mat") 
+    else:
+        data_path = f"{root_dir}/Assets/Retina/den_lens_ssf.mat"
+
+    # Load the matlab file
+    lens_data = loadmat(data_path)
     S_lens_ssf = np.arange(390, 831)
     lens_density = CubicSpline(S_lens_ssf, lens_data["den_lens_ssf"])(lambdas)
     lens_transmit = 10 ** (-lens_density)
-    lens_transmit = lens_transmit[:,0]
+    lens_transmit = lens_transmit[:, 0]
 
     return lens_transmit
 
 
-def generate_cone_fundamentals_from_peak_frequencies(peak_frequencies, lambdas=None):
+def generate_cone_fundamentals_from_peak_frequencies(peak_frequencies, lambdas=None, root_dir=None):
+    """Generate cone fundamentals from peak frequencies.
 
+    Args:
+        peak_frequencies: List of peak wavelengths for each cone type
+        lambdas: Wavelength range (default: 400-700nm)
+        root_dir: Root directory for loading lens data
+
+    Returns:
+        Cone fundamentals as numpy array (301, 4)
+    """
     # lambda is the spectrum range (400-700 nm visible wavelength is the default)
     if lambdas is None:
         lambdas = np.arange(400, 701)
 
     # lens transmittance function (fixed throughout the cone fundamentals computation)
-    lens_transmit = generate_lens_transmit(lambdas)
+    lens_transmit = generate_lens_transmit(lambdas, root_dir)
 
     cone_fundamentals = np.zeros((301, 4))
     for pid, peak_frequency in enumerate(peak_frequencies):
-        cone_fundamentals[:, pid] = generate_sensitivity_curve(lambda_max=peak_frequency, OD=0.001, spectrum=lambdas)
+        cone_fundamentals[:, pid] = generate_sensitivity_curve(
+            lambda_max=peak_frequency,
+            OD=0.001,
+            spectrum=lambdas
+        )
         cone_fundamentals[:, pid] *= lens_transmit
         cone_fundamentals[:, pid] /= max(cone_fundamentals[:, pid])
 

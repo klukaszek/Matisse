@@ -3,8 +3,8 @@ import os
 import sys
 sys.path.append('.')
 
-from SimulatedJAX.Retina import RetinaModel
-from DatasetJAX import create_dataset
+from Simulated.Retina import RetinaModel
+from Dataset import create_dataset
 
 print("="*70)
 print("Generating Full ARAD_1K Training Dataset")

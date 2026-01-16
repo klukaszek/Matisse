@@ -9,10 +9,10 @@ import time
 from tqdm.auto import tqdm
 from typing import Tuple, Dict, Any, NamedTuple
 
-from SimulatedJAX.Retina import RetinaModel
-from SimulatedJAX.Cortex import CortexModel
-from DatasetJAX import create_dataset
-from DatasetJAX.NTIRE import create_dataloader
+from Simulated.Retina import RetinaModel
+from Simulated.Cortex import CortexModel
+from Dataset import create_dataset
+from Dataset.NTIRE import create_dataloader
 
 # Define a container for the three optimizer states
 class OptimizerStates(NamedTuple):

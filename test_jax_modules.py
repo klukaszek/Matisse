@@ -4,14 +4,14 @@ import jax.numpy as jnp
 import sys
 sys.path.append('.')
 
-from SimulatedJAX.NeuralScope import NS_cone_mosaic, NS_internal_percept
-from SimulatedJAX.Cortex import (
+from Simulated.NeuralScope import NS_cone_mosaic, NS_internal_percept
+from Simulated.Cortex import (
     DefaultConeSpectralType,
     UNet,
     DefaultLateralInhibitionWeights,
     DefaultCellPosition,
 )
-from SimulatedJAX.Retina import DefaultLateralInhibition
+from Simulated.Retina import DefaultLateralInhibition
 
 
 def test_module(name, module, input_shape, key):

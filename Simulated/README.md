@@ -14,7 +14,7 @@ The original Matisse model is implemented in PyTorch. This JAX version provides:
 ## Directory Structure
 
 ```
-SimulatedJAX/
+Simulated/
 ├── NeuralScope/              # Auxiliary neural networks
 │   ├── NS_cone_mosaic.py     # Linear projection for cone mosaic
 │   └── NS_internal_percept.py # Linear projection for internal percept
@@ -180,7 +180,7 @@ output = map_coordinates(
 ```python
 import jax
 import jax.numpy as jnp
-from SimulatedJAX.Cortex.D_demosaicing import UNet
+from Simulated.Cortex.D_demosaicing import UNet
 
 # Initialize random key
 key = jax.random.PRNGKey(42)

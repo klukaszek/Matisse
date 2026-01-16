@@ -1,47 +1,165 @@
-import torch
-import torch.nn as nn
-from Simulated.Retina.EM_eye_motion import create_eye_motion_module
-from Simulated.Retina.FV_spatial_sampling import create_spatial_sampling_module
-from Simulated.Retina.SS_spectral_sampling import create_spectral_sampling_module
-from Simulated.Retina.LI_lateral_inhibition import create_lateral_inhibition_module
-from Simulated.Retina.SC_spike_conversion import create_spike_conversion_module
-from Simulated.Retina.helper.ColorSpaceTransform import ColorSpaceTransform
+"""JAX/Equinox implementation of RetinaModel combining all retina modules."""
+import jax
+import jax.numpy as jnp
+import equinox as eqx
+from jaxtyping import Array, Float
+from typing import Tuple, Optional
+
+from .EM_Default import DefaultEyeMotion
+from .FV_spatial_sampling import DefaultSpatialSampling
+from .SS_spectral_sampling import DefaultSpectralSampling
+from .LI_Default import DefaultLateralInhibition
+from .SC_Default import DefaultSpikeConversion
+from .helper.ColorSpaceTransform import ColorSpaceTransform
 
 
-class RetinaModel(nn.Module):
-    def __init__(self, params, device='cpu'):
-        super(RetinaModel, self).__init__()
+class RetinaModel(eqx.Module):
+    """Complete retina model combining all forward processing components.
 
-        self.EyeMotion          = create_eye_motion_module(params, device)
-        self.SpatialSampling    = create_spatial_sampling_module(params, device)
-        self.SpectralSampling   = create_spectral_sampling_module(params, device)
-        self.LateralInhibition  = create_lateral_inhibition_module(params, device)
-        self.SpikeConversion    = create_spike_conversion_module( params, device)        
+    This model simulates the forward processing of the retina from RGB input
+    to optic nerve signals, including eye movements, spatial sampling,
+    spectral sampling, lateral inhibition, and spike conversion.
+    """
+    EyeMotion: DefaultEyeMotion
+    SpatialSampling: DefaultSpatialSampling
+    SpectralSampling: DefaultSpectralSampling
+    LateralInhibition: DefaultLateralInhibition
+    SpikeConversion: DefaultSpikeConversion
+    CST: ColorSpaceTransform
+    required_image_resolution: int = eqx.field(static=True)
 
+    def __init__(
+        self,
+        simulation_size: int = 256,
+        timesteps_per_image: int = 8,
+        max_shift_size: int = 128,
+        cone_types_str: str = 'LMS',
+        cone_distribution_type: str = 'Human',
+        simulating_tetra: bool = False,
+        cone_fundamentals_params: Optional[dict] = None,
+        root_dir: Optional[str] = None
+    ):
+        """Initialize retina model.
+
+        Args:
+            simulation_size: Dimension of optic nerve signal
+            timesteps_per_image: Number of timesteps per image
+            max_shift_size: Maximum shift size for eye movements
+            cone_types_str: Type of cone configuration
+            cone_distribution_type: Type of cone spatial distribution
+            simulating_tetra: Whether simulating tetrachromacy
+            cone_fundamentals_params: Peak wavelengths for tetrachromacy
+            root_dir: Root directory for loading data files
+        """
+        # Initialize all submodules
+        self.EyeMotion = DefaultEyeMotion(
+            timesteps_per_image=timesteps_per_image,
+            max_shift_size=max_shift_size
+        )
+
+        self.SpatialSampling = DefaultSpatialSampling(
+            simulation_size=simulation_size,
+            max_shift_size=max_shift_size,
+            cone_distribution_type=cone_distribution_type,
+            root_dir=root_dir
+        )
+
+        self.SpectralSampling = DefaultSpectralSampling(
+            simulation_size=simulation_size,
+            cone_types_str=cone_types_str,
+            simulating_tetra=simulating_tetra,
+            cone_fundamentals_params=cone_fundamentals_params,
+            root_dir=root_dir
+        )
+
+        self.LateralInhibition = DefaultLateralInhibition(
+            simulation_size=simulation_size
+        )
+
+        self.SpikeConversion = DefaultSpikeConversion()
+
+        # Store required image resolution
         self.required_image_resolution = self.SpatialSampling.required_image_resolution
-        self.CST = ColorSpaceTransform(self.SpectralSampling.get_cone_fundamentals(), device)
 
-        self.device = device
+        # Initialize color space transform
+        cone_fundamentals = self.SpectralSampling.get_cone_fundamentals()
+        self.CST = ColorSpaceTransform(cone_fundamentals, root_dir=root_dir)
 
-    def forward(self, batch_LMS_full_field, intermediate_outputs=False):
-        # Eye motion module samples the input image to the current field of view by applying the eye motion
-        batch_LMS_current_FoV, batch_true_dxy = self.EyeMotion.forward(batch_LMS_full_field, self.required_image_resolution)
-        # Normalize the true eye motion to the range of [-1, 1]
-        batch_true_dxy = batch_true_dxy.float() / (self.required_image_resolution / 2)
+    def __call__(
+        self,
+        batch_LMS_full_field: Float[Array, "batch 4 height width"],
+        *,
+        key: jax.random.PRNGKey,
+        intermediate_outputs: bool = False
+    ) -> Tuple:
+        """Forward pass through retina model.
 
-        # Spatial sampling module warps the sampled image to the current field of view (foveation effect)
-        batch_warped_LMS_current_FoV = self.SpatialSampling.forward(batch_LMS_current_FoV)
+        Args:
+            batch_LMS_full_field: Full-field LMS input images
+            key: JAX random key for stochastic processes
+            intermediate_outputs: Whether to return intermediate outputs
 
-        # Spectral sampling module converts the warped LMS image to the photoreceptor activation values
-        batch_pa = self.SpectralSampling.forward(batch_warped_LMS_current_FoV)
+        Returns:
+            If intermediate_outputs=False:
+                (batch_ons, batch_true_dxy, batch_warped_LMS_current_FoV)
+            If intermediate_outputs=True:
+                (batch_ons, batch_true_dxy, batch_warped_LMS_current_FoV,
+                 batch_pa, batch_bipolar_signals, batch_LMS_current_FoV)
+        """
+        keys = jax.random.split(key, 4)
 
-        # Lateral inhibition module applies the lateral inhibition effect to the photoreceptor activation values
-        batch_bipolar_signals = self.LateralInhibition.forward(batch_pa)
+        # Eye motion: sample current field of view with eye movements
+        batch_LMS_current_FoV, batch_true_dxy = self.EyeMotion(
+            batch_LMS_full_field,
+            self.required_image_resolution,
+            key=keys[0]
+        )
 
-        # Spike conversion module converts the bipolar signals to the spike signals (i.e. optic nerve signals)
-        batch_ons = self.SpikeConversion.forward(batch_bipolar_signals)
+        # Normalize true eye motion to range [-1, 1]
+        batch_true_dxy = batch_true_dxy.astype(jnp.float32) / (self.required_image_resolution / 2)
+
+        # Spatial sampling: apply foveation effect via MIP-mapping
+        batch_warped_LMS_current_FoV = self.SpatialSampling(batch_LMS_current_FoV)
+
+        # Spectral sampling: convert LMS to photoreceptor activation
+        batch_pa = self.SpectralSampling(batch_warped_LMS_current_FoV, key=keys[1])
+
+        # Lateral inhibition: apply center-surround receptive fields
+        # Need to vmap over timesteps
+        def apply_li_timestep(pa_timestep, key_timestep):
+            # Add batch dimension for LateralInhibition (expects rank 4)
+            pa_with_batch = pa_timestep[None, ...]  # (1, C, H, W)
+            result = self.LateralInhibition(pa_with_batch, key=key_timestep)
+            return result[0]  # Remove batch dimension
+
+        # Split keys for each timestep
+        batch_size, timesteps = batch_pa.shape[0], batch_pa.shape[1]
+        li_keys = jax.random.split(keys[2], batch_size * timesteps).reshape(batch_size, timesteps, -1)
+
+        def apply_li_batch(pa_batch, keys_batch):
+            return jax.vmap(apply_li_timestep)(pa_batch, keys_batch)
+
+        batch_bipolar_signals = jax.vmap(apply_li_batch)(batch_pa, li_keys)
+
+        # Spike conversion: convert bipolar signals to spikes (currently identity)
+        batch_ons = self.SpikeConversion(batch_bipolar_signals)
 
         if not intermediate_outputs:
             return batch_ons, batch_true_dxy, batch_warped_LMS_current_FoV
         else:
-            return batch_ons, batch_true_dxy, batch_warped_LMS_current_FoV, batch_pa, batch_bipolar_signals, batch_LMS_current_FoV
+            return (
+                batch_ons,
+                batch_true_dxy,
+                batch_warped_LMS_current_FoV,
+                batch_pa,
+                batch_bipolar_signals,
+                batch_LMS_current_FoV
+            )
+
+    def get_cone_mosaic(self) -> Float[Array, "1 4 height width"]:
+        """Get the cone mosaic from spectral sampling module."""
+        return self.SpectralSampling.get_cone_mosaic()
+
+    def get_cone_fundamentals(self) -> Float[Array, "301 4"]:
+        """Get the cone spectral sensitivities."""
+        return self.SpectralSampling.get_cone_fundamentals()

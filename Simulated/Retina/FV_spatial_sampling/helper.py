@@ -141,12 +141,11 @@ def get_cone_sampling_map(
         current_dir = os.path.dirname(os.path.abspath(__file__))
         data_path = os.path.join(
             current_dir,
-            "cell_position",
-            "data",
+            "../../../Assets/Retina",
             f"cone_locs_{cone_distribution_type}_512.cpkl"
         )
     else:
-        data_path = f"{root_dir}/Simulated/Retina/FV_spatial_sampling/cell_position/data/cone_locs_{cone_distribution_type}_512.cpkl"
+        data_path = f"{root_dir}/Assets/Retina/cone_locs_{cone_distribution_type}_512.cpkl"
 
     with open(data_path, 'rb') as f:
         cone_locs_in_ecc = pickle.load(f)
