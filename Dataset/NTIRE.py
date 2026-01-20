@@ -1,7 +1,5 @@
 """JAX/Grain implementation of NTIRE/ARAD_1K hyperspectral dataset."""
 import os
-import jax
-import jax.numpy as jnp
 import numpy as np
 import pickle
 from tqdm.auto import tqdm
@@ -175,21 +173,16 @@ class NTIRE(GrainDataset):
 
         print(f'Dataset ready: {len(self.file_list)} samples')
 
-    def __getitem__(self, index) -> jnp.ndarray:
+    def __getitem__(self, index) -> np.ndarray:
         """Get a single LMS image.
 
         Args:
             index: Index of the image to retrieve
 
         Returns:
-            LMS image as JAX array of shape (H, W, 4)
+            LMS image as numpy array of shape (H, W, 4)
         """
-        index = index % len(self.file_list)
-        file_path = self.file_list[index]
-
-        # Load using numpy
-        data_np = np.load(file_path)
-        return jnp.array(data_np)
+        return np.load(self.file_list[index % len(self.file_list)])
 
     def __len__(self) -> int:
         """Return the number of samples in the dataset."""

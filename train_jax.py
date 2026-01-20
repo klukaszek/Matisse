@@ -1,10 +1,14 @@
 "JAX/Equinox/Optax training loop for Matisse cortical model."
+import os
+
+# Disable JAX GPU memory preallocation - must be set before importing JAX
+os.environ['XLA_PYTHON_CLIENT_PREALLOCATE'] = 'false'
+
 import jax
 import jax.numpy as jnp
 import equinox as eqx
 import optax
 import orbax.checkpoint as ocp
-import os
 import time
 from tqdm.auto import tqdm
 from typing import Tuple, Dict, Any, NamedTuple
@@ -123,6 +127,8 @@ def train_cortical_model(
     print("JAX/Equinox/Optax Training - Matisse Cortical Model (Optimized with Orbax)")
     print("="*70)
 
+    print(f"\nJAX backend: {jax.default_backend()}")
+    print(f"Devices: {jax.devices()}")
 
     experiment_name = params['Experiment']['name']
     root_dir = params.get('root_dir', os.path.dirname(os.path.abspath(__file__)))
