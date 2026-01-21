@@ -37,6 +37,8 @@ Tutorials/RetinaSimulation/Results
 Dataset/FullColors*
 Dataset/HueSphere*
 
+model_*.eqx
+
 # Large dataset files
 Dataset/ARAD_1K_Mirror/
 Dataset/ARAD_*_LMS/
