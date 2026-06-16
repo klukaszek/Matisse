@@ -2,17 +2,17 @@
 import jax
 import jax.numpy as jnp
 import equinox as eqx
-from jaxtyping import Array, Float, Complex
+from jaxtyping import Array, Float
 
 
 class DefaultLateralInhibitionWeights(eqx.Module):
     """Learnable lateral inhibition weights using FFT-based convolution/deconvolution.
 
     Learns a kernel in the frequency domain for efficient spatial convolution
-    and deconvolution operations. The kernel is stored as a complex-valued
-    parameter in the Fourier domain.
+    and deconvolution operations. The kernel is stored as real and imaginary
+    channels in the Fourier domain, matching the PyTorch reference.
     """
-    LIF: Complex[Array, "fft_dim fft_dim"]  # Lateral Inhibition Filter in frequency domain
+    LIF: Float[Array, "fft_dim fft_dim 2"]  # real/imag Fourier-domain filter
     FFT_DIM: int = eqx.field(static=True)
     L_PAD: int = eqx.field(static=True)
     R_PAD: int = eqx.field(static=True)
@@ -40,8 +40,13 @@ class DefaultLateralInhibitionWeights(eqx.Module):
         kernel_fft = jnp.fft.fft2(kernel)
         kernel_fft_shift = jnp.fft.fftshift(kernel_fft)
 
-        # Store as complex array (this will be a learnable parameter)
-        self.LIF = kernel_fft_shift
+        # Store real/imag as separate real parameters. JAX's gradient for a
+        # real-valued loss over a complex leaf is conjugated; optimizing the
+        # real pair matches PyTorch's view_as_complex(nn.Parameter(...)).
+        self.LIF = jnp.stack([kernel_fft_shift.real, kernel_fft_shift.imag], axis=-1)
+
+    def _lif_complex(self):
+        return self.LIF[..., 0] + 1j * self.LIF[..., 1]
 
     def deconvolve(
         self,
@@ -64,9 +69,20 @@ class DefaultLateralInhibitionWeights(eqx.Module):
         ons_fft = jnp.fft.fft2(ons, axes=(2, 3))
         ons_fft = jnp.fft.fftshift(ons_fft, axes=(2, 3))
 
-        # Deconvolution: division in frequency domain
-        # Add small epsilon to avoid division by zero
-        pa_fft = ons_fft / (self.LIF + 1e-10)
+        # Deconvolution: division in frequency domain.
+        # Naive `ons_fft / (LIF + 1e-10)` is unstable: the epsilon is added to a
+        # *complex* value so it never floors the magnitude |LIF|, and as the
+        # learned filter drives some frequencies toward zero the amplification
+        # 1/|LIF| explodes (it reached ~75x in practice), eventually producing
+        # inf -> NaN that poisons the whole model. Use a Wiener-style inverse
+        # instead, which bounds the amplification to 1/(2*sqrt(eps)):
+        #     1 / LIF  ->  conj(LIF) / (|LIF|^2 + eps)
+        # eps caps amplification at 1/(2*sqrt(eps)); 1e-4 -> ~50x, gentle enough
+        # to preserve reconstruction fidelity while killing the runaway regime.
+        eps = 1e-4
+        lif = self._lif_complex()
+        lif_power = jnp.abs(lif) ** 2
+        pa_fft = ons_fft * jnp.conj(lif) / (lif_power + eps)
 
         # Transform back to spatial domain
         pa_fft = jnp.fft.ifftshift(pa_fft, axes=(2, 3))
@@ -100,7 +116,7 @@ class DefaultLateralInhibitionWeights(eqx.Module):
         pa_fft = jnp.fft.fftshift(pa_fft, axes=(2, 3))
 
         # Convolution: multiplication in frequency domain
-        ons_fft = pa_fft * self.LIF
+        ons_fft = pa_fft * self._lif_complex()
 
         # Transform back to spatial domain
         ons_fft = jnp.fft.ifftshift(ons_fft, axes=(2, 3))
@@ -122,7 +138,7 @@ class DefaultLateralInhibitionWeights(eqx.Module):
             Spatial domain kernel
         """
         # Transform back to spatial domain
-        kernel_spatial = jnp.fft.ifft2(jnp.fft.ifftshift(self.LIF))
+        kernel_spatial = jnp.fft.ifft2(jnp.fft.ifftshift(self._lif_complex()))
         kernel_spatial = kernel_spatial.real
 
         # Crop to desired size

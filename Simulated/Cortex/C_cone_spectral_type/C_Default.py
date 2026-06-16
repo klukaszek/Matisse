@@ -48,8 +48,8 @@ class DefaultConeSpectralType(eqx.Module):
         """
         C = self.raw_cone_identity_function
 
-        # Normalize: C / sqrt(sum(C^2) + eps)
-        norm = jnp.sqrt(jnp.sum(C * C, axis=1, keepdims=True) + 1e-5)
+        # Match PyTorch: epsilon is added after the square root.
+        norm = jnp.sqrt(jnp.sum(C * C, axis=1, keepdims=True)) + 1e-5
         C = C / norm
 
         return C

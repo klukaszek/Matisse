@@ -117,12 +117,16 @@ class DefaultSpatialSampling(eqx.Module):
                 # map_coordinates wants (2, H, W) with (y, x) order
                 coords = jnp.stack([grid_pix[:, :, 1], grid_pix[:, :, 0]], axis=0)
 
-                # Sample all channels
-                sampled_channels = []
-                for c_idx in range(img.shape[0]):
-                    sampled = map_coordinates(img[c_idx], coords, order=1, mode='constant', cval=0)
-                    sampled_channels.append(sampled)
-                return jnp.stack(sampled_channels, axis=0)
+                # Sample all channels with vmap. Keeping this inside XLA avoids
+                # unrolling a Python list of per-channel map_coordinates calls.
+                return jax.vmap(
+                    lambda channel: map_coordinates(
+                        channel,
+                        coords,
+                        order=1,
+                        mode='nearest',
+                    )
+                )(img)
 
             # Apply to all batch items
             sampled = jax.vmap(sample_single, in_axes=(0, None))(im_reshaped, grid_pixel[0])

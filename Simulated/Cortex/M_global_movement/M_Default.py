@@ -14,12 +14,21 @@ class DefaultGlobalMovement(eqx.Module):
     """
     shift_range: tuple = eqx.field(static=True)
     simulation_size: int = eqx.field(static=True)
+    required_image_resolution: int = eqx.field(static=True)
     shifts: tuple = eqx.field(static=True)
 
-    def __init__(self, simulation_size: int = 256):
+    def __init__(
+        self,
+        simulation_size: int = 256,
+        required_image_resolution: int = None
+    ):
         """Initialize global movement module."""
-        # Pre-compute constants
         self.simulation_size = simulation_size
+        self.required_image_resolution = (
+            required_image_resolution
+            if required_image_resolution is not None
+            else simulation_size
+        )
         self.shift_range = tuple(range(-2, 3))
         self.shifts = tuple((dx, dy) for dx in self.shift_range for dy in self.shift_range)
 
@@ -153,11 +162,9 @@ class DefaultGlobalMovement(eqx.Module):
         # Unwarp the blurred ONS
         xy_full = P_cell_position.get_XY_default_locations()
 
-        # Use simulation_size as required resolution
-        # Note: compute_required_image_resolution can't be used inside JIT because
-        # it requires concrete int conversion. At initialization, RealNVP is near-identity
-        # so simulation_size is a good approximation.
-        required_image_resolution = self.simulation_size
+        # JAX requires array shapes to remain static under jit. Use the retina's
+        # reference power-of-two resolution rather than the ONS resolution.
+        required_image_resolution = self.required_image_resolution
 
         # Generate unwarping grid
         grid = self.generate_grid_fixed(
@@ -177,7 +184,7 @@ class DefaultGlobalMovement(eqx.Module):
         # Grid sample to unwarp (use map_coordinates)
         from jax.scipy.ndimage import map_coordinates
 
-        def grid_sample(img, grid_uv):
+        def grid_sample(img, grid_uv, order=1):
             """Sample image using UV grid."""
             # Convert from [-1, 1] to pixel coordinates
             H, W = img.shape[2], img.shape[3]
@@ -187,7 +194,13 @@ class DefaultGlobalMovement(eqx.Module):
             # Sample for each batch item
             def sample_batch_item(img_single, grid_single):
                 coords = jnp.stack([grid_single[:, :, 1], grid_single[:, :, 0]], axis=0)
-                return map_coordinates(img_single[0], coords, order=1, mode='constant', cval=0)[None, ...]
+                return map_coordinates(
+                    img_single[0],
+                    coords,
+                    order=order,
+                    mode='constant',
+                    cval=0
+                )[None, ...]
 
             return jax.vmap(sample_batch_item)(img, grid_pixel)
 
@@ -196,8 +209,7 @@ class DefaultGlobalMovement(eqx.Module):
 
         # Create mask
         mask = jnp.ones_like(blurred_ons1)
-        full_mask = grid_sample(mask, uvs)
-        full_mask = (full_mask > 0.5).astype(jnp.float32)  # Nearest-neighbor-like
+        full_mask = grid_sample(mask, uvs, order=0)
 
         # Generate image pyramid
         levels = int(np.log2(required_image_resolution)) - 2

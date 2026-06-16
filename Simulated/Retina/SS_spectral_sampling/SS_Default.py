@@ -84,13 +84,14 @@ class DefaultSpectralSampling(eqx.Module):
         # Then sum over spectral dimension (axis=2)
         photoreceptor_activation = jnp.sum(lms * self.cone_mosaic, axis=2, keepdims=True)
 
-        # Add Poisson-like noise
-        # Generate random ratio between 0 and 1
+        # The reference samples one discrete noise level for the whole tensor.
         key1, key2 = jax.random.split(key)
-        ratio = jax.random.uniform(key1, shape=()) * 1.0  # 0.0 to 1.0
+        ratio = jax.random.randint(key1, shape=(), minval=0, maxval=11) * 0.1
 
         # Generate Gaussian noise with std proportional to sqrt(activation)
-        noise_std = jnp.sqrt(jnp.abs(photoreceptor_activation)) * self.cone_cell_noise_std * ratio + 1e-10
+        # Match the reference: torch.normal(mean, std) samples from N(mean, std²).
+        # We replicate this by sampling N(0, std²) and adding to the activation.
+        noise_std = jnp.sqrt(photoreceptor_activation) * self.cone_cell_noise_std * ratio + 1e-10
         noise = jax.random.normal(key2, shape=photoreceptor_activation.shape)
         noisy_pa = photoreceptor_activation + noise * noise_std
 

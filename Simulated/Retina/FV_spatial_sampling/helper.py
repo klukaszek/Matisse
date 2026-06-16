@@ -32,8 +32,9 @@ def compute_required_image_resolution(xy: Float[Array, "1 2 height width"]) -> i
     dv_sorted = jnp.sort(dv.flatten())[:10]
 
     multiplier = 1.0 / jnp.minimum(jnp.mean(du_sorted), jnp.mean(dv_sorted))
-    # Convert to Python int for use in static fields
-    required_image_resolution = int(jnp.ceil(multiplier))
+    # Match the reference implementation. Power-of-two dimensions are also
+    # required by the coarse-to-fine global movement pyramid.
+    required_image_resolution = 2 ** int(jnp.ceil(jnp.log2(multiplier)))
 
     return required_image_resolution
 
@@ -95,7 +96,7 @@ def rand_perlin_2d(shape, res, fade_fn=None):
     return result
 
 
-def rand_perlin_2d_octaves(shape, res, octaves=1, persistence=0.5, seed=0):
+def rand_perlin_2d_octaves(shape, res, octaves=1, persistence=0.5, seed=None):
     """Generate multi-octave Perlin noise.
 
     Args:
@@ -103,12 +104,13 @@ def rand_perlin_2d_octaves(shape, res, octaves=1, persistence=0.5, seed=0):
         res: Base resolution tuple (res_h, res_w)
         octaves: Number of octaves
         persistence: Amplitude decay factor
-        seed: Random seed
+        seed: Optional NumPy random seed
 
     Returns:
         Multi-octave Perlin noise
     """
-    np.random.seed(seed)
+    if seed is not None:
+        np.random.seed(seed)
     noise = jnp.zeros(shape)
     frequency = 1
     amplitude = 1
@@ -159,8 +161,10 @@ def get_cone_sampling_map(
     cone_locs_in_ecc = cone_locs_in_ecc / np.max(np.abs(cone_locs_in_ecc))
 
     # Generate Perlin noise for realistic variation
+    # Match the reference's single seeded random stream: X is drawn first,
+    # followed by Y without resetting the generator.
     noise_x = rand_perlin_2d_octaves((N, N), (2, 2), 6, 0.8, seed=0)
-    noise_y = rand_perlin_2d_octaves((N, N), (2, 2), 6, 0.8, seed=1)
+    noise_y = rand_perlin_2d_octaves((N, N), (2, 2), 6, 0.8)
 
     noise = jnp.stack([noise_x, noise_y], axis=-1)
     # Pad to handle boundaries

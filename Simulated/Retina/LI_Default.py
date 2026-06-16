@@ -118,10 +118,9 @@ class DefaultLateralInhibition(eqx.Module):
         # Crop to original size and take real part
         ons = ons[:, :, self.L_PAD:-self.R_PAD, self.L_PAD:-self.R_PAD].real
 
-        # Add multiplicative noise
-        # Generate random ratio between 0 and 1
+        # The reference samples one discrete noise level for the whole tensor.
         key1, key2 = jax.random.split(key)
-        ratio = jax.random.uniform(key1, shape=()) * 1.0  # 0.0 to 1.0
+        ratio = jax.random.randint(key1, shape=(), minval=0, maxval=11) * 0.1
 
         # Add noise: ons + noise * ons * std * ratio
         noise = jax.random.normal(key2, shape=ons.shape)

@@ -1,13 +1,24 @@
-"""Generate full ARAD_1K training dataset (50k samples)."""
+"""Generate full ARAD_1K training dataset (preprocesses only full_LMS, crops on-demand).
+
+This script triggers the NTIRE dataset preprocessing which:
+1. Validates ARAD1K .mat files against JSON manifests
+2. Spectrally interpolates 31 bands -> 301 bands (band-by-band linear)
+3. Converts hyperspectral -> LMS with white balance
+4. Saves ONLY full_LMS images (no pre-cached crops)
+
+Crops are generated on-demand at training time, saving ~250GB of disk space
+compared to pre-caching all crops.
+"""
 import os
 import sys
+import json
 sys.path.append('.')
 
 from Simulated.Retina import RetinaModel
 from Dataset import create_dataset
 
 print("="*70)
-print("Generating Full ARAD_1K Training Dataset")
+print("Generating ARAD_1K Training Dataset (full_LMS only)")
 print("="*70)
 
 # Configuration for full dataset (matching original PyTorch config)
@@ -31,7 +42,7 @@ params = {
 }
 
 print("\nConfiguration:")
-print(f"  Dataset size: {params['Dataset']['size']} samples")
+print(f"  Virtual training samples: {params['Dataset']['size']:,} (crops generated on-demand)")
 print(f"  Timesteps per image: {params['Experiment']['timesteps_per_image']}")
 print(f"  Max shift size: {params['RetinaModel']['max_shift_size']}")
 
@@ -47,20 +58,25 @@ retina = RetinaModel(
 )
 print(f"✓ Required image resolution: {retina.required_image_resolution}")
 
-# Calculate expected data size
+# Calculate expected data size (only full_LMS, no pre-cached crops)
 dim_image = (
     retina.required_image_resolution +
     (params['Experiment']['timesteps_per_image'] - 1) *
     2 * params['RetinaModel']['max_shift_size']
 )
-dataset_size = params['Dataset']['size']
-expected_gb = dataset_size * dim_image * dim_image * 4 * 4 / 1e9
+
+# 900 source images, each ~ (482, 512, 4) float32 = ~4MB
+# After interpolation: (482, 512, 301) -> LMS (482, 512, 4) = ~4MB each
+# Total: ~900 * 4MB = ~3.6GB
+num_source_images = 900
+bytes_per_image = 482 * 512 * 4 * 4  # H * W * 4 channels * float32
+expected_gb = num_source_images * bytes_per_image / 1e9
 
 print(f"\nDataset details:")
-print(f"  Image dimension: {dim_image}x{dim_image}")
-print(f"  Number of samples: {dataset_size:,}")
-print(f"  Estimated size: ~{expected_gb:.1f} GB")
-print(f"  Source images: 900 ARAD hyperspectral files")
+print(f"  Source images: {num_source_images} ARAD hyperspectral files")
+print(f"  Full LMS cache: ~{expected_gb:.1f} GB (no pre-cached crops)")
+print(f"  Crops: generated on-demand at training time")
+print(f"  Disk savings vs pre-cached crops: ~{params['Dataset']['size'] * dim_image * dim_image * 4 * 4 / 1e9 - expected_gb:.0f} GB")
 
 # Check disk space
 import shutil
@@ -68,9 +84,9 @@ stat = shutil.disk_usage(params['root_dir'])
 free_gb = stat.free / 1e9
 print(f"  Free disk space: {free_gb:.1f} GB")
 
-if free_gb < expected_gb * 1.2:
+if free_gb < expected_gb * 1.5:
     print(f"\n⚠️  WARNING: Low disk space!")
-    print(f"     Need: ~{expected_gb * 1.2:.1f} GB (with margin)")
+    print(f"     Need: ~{expected_gb * 1.5:.1f} GB (with margin)")
     print(f"     Have: {free_gb:.1f} GB")
     print("\n  Continuing anyway (data will be cached incrementally)...")
 else:
@@ -81,30 +97,27 @@ print("Starting preprocessing...")
 print("This will take approximately 5-10 minutes")
 print("="*70)
 
-# Create dataset (this triggers preprocessing)
+# Create dataset (this triggers preprocessing of full_LMS only)
 dataset = create_dataset('NTIRE', params, retina)
 
 print("\n" + "="*70)
 print("Dataset Generation Complete!")
 print("="*70)
-print(f"✓ Created {len(dataset):,} training samples")
+print(f"✓ full_LMS cache: {len(dataset.file_list):,} source images")
+print(f"✓ Virtual training samples: {len(dataset):,} (crops generated on-demand at train time)")
 print(f"✓ Sample shape: {dataset[0].shape}")
 
-# Show final disk usage
-data_dir = f'{params["root_dir"]}/Dataset/ARAD_{dim_image}_LMS/LMS/data'
+# Show final disk usage of full_LMS cache
+import glob
+data_dir = f'{params["root_dir"]}/Dataset/ARAD_{dim_image}_LMS/full_LMS/data'
 if os.path.exists(data_dir):
-    import subprocess
-    result = subprocess.run(
-        ['du', '-sh', data_dir],
-        capture_output=True,
-        text=True
-    )
-    if result.returncode == 0:
-        size = result.stdout.split()[0]
-        print(f"✓ Disk usage: {size}")
+    npy_files = glob.glob(f'{data_dir}/*.npy')
+    total_bytes = sum(os.path.getsize(f) for f in npy_files)
+    total_gb = total_bytes / 1e9
+    print(f"✓ full_LMS cache: {len(npy_files)} files, {total_gb:.1f} GB")
 
 print("\n🎉 Ready for training!")
 print("\nNext steps:")
-print("  1. Dataset is cached and ready to use")
-print("  2. Run training script with: uv run python train_jax.py")
-print("  3. Subsequent runs will use cached data (fast)")
+print("  1. Dataset full_LMS cache is ready to use")
+print("  2. Run training script with: uv run python train.py")
+print("  3. Crops are generated on-demand during training (fast)")

@@ -124,22 +124,17 @@ class RetinaModel(eqx.Module):
         # Spectral sampling: convert LMS to photoreceptor activation
         batch_pa = self.SpectralSampling(batch_warped_LMS_current_FoV, key=keys[1])
 
-        # Lateral inhibition: apply center-surround receptive fields
-        # Need to vmap over timesteps
-        def apply_li_timestep(pa_timestep, key_timestep):
-            # Add batch dimension for LateralInhibition (expects rank 4)
-            pa_with_batch = pa_timestep[None, ...]  # (1, C, H, W)
-            result = self.LateralInhibition(pa_with_batch, key=key_timestep)
-            return result[0]  # Remove batch dimension
-
-        # Split keys for each timestep
+        # Match the reference's single LI call so all batch items and timesteps
+        # share one sampled noise ratio.
         batch_size, timesteps = batch_pa.shape[0], batch_pa.shape[1]
-        li_keys = jax.random.split(keys[2], batch_size * timesteps).reshape(batch_size, timesteps, -1)
-
-        def apply_li_batch(pa_batch, keys_batch):
-            return jax.vmap(apply_li_timestep)(pa_batch, keys_batch)
-
-        batch_bipolar_signals = jax.vmap(apply_li_batch)(batch_pa, li_keys)
+        pa_flat = batch_pa.reshape(
+            batch_size * timesteps,
+            *batch_pa.shape[2:]
+        )
+        batch_bipolar_signals = self.LateralInhibition(
+            pa_flat,
+            key=keys[2]
+        ).reshape(batch_pa.shape)
 
         # Spike conversion: convert bipolar signals to spikes (currently identity)
         batch_ons = self.SpikeConversion(batch_bipolar_signals)

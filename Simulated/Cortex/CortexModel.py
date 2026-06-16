@@ -33,6 +33,7 @@ class CortexModel(eqx.Module):
         self,
         latent_dim: int = 8,
         simulation_size: int = 256,
+        required_image_resolution: int = None,
         simulating_tetra: bool = False,
         *,
         key: jax.random.PRNGKey
@@ -42,6 +43,8 @@ class CortexModel(eqx.Module):
         Args:
             latent_dim: Number of latent channels
             simulation_size: Spatial dimension of simulation
+            required_image_resolution: Retina field-of-view resolution used by
+                the global movement pyramid
             simulating_tetra: Whether simulating tetrachromacy
             key: JAX random key for initialization
         """
@@ -71,7 +74,10 @@ class CortexModel(eqx.Module):
             key=keys[3]
         )
 
-        self.M_global_movement = DefaultGlobalMovement(simulation_size)
+        self.M_global_movement = DefaultGlobalMovement(
+            simulation_size,
+            required_image_resolution=required_image_resolution
+        )
 
         # NeuralScope modules
         self.ns_ip = NS_internal_percept(
@@ -217,19 +223,27 @@ class CortexModel(eqx.Module):
 
     def get_unwarped_percept(
         self,
-        warped_ip_sRGB: Float[Array, "batch channels height width"]
+        warped_ip_sRGB: Float[Array, "batch channels height width"],
+        required_image_resolution: int = None
     ) -> Tuple[Float[Array, "batch height width channels"], Float[Array, "height width"]]:
         """Get unwarped percept by applying inverse cell position transform.
 
         Args:
             warped_ip_sRGB: Warped internal percept in sRGB space
+            required_image_resolution: Output grid resolution. MUST be supplied
+                (as a static value) when this method is wrapped in jit: it is
+                used as an array shape, and the fallback computes it via
+                ``compute_required_image_resolution`` which calls ``int()`` on a
+                traced value and cannot run under jit. Callers should pass the
+                retina's known resolution (``retina.required_image_resolution``).
 
         Returns:
             Tuple of (internal_percept_sRGB, invalid_regions)
         """
         # Get XY locations
         xy_full = self.P_cell_position.get_XY_default_locations()
-        required_image_resolution = compute_required_image_resolution(xy_full)
+        if required_image_resolution is None:
+            required_image_resolution = compute_required_image_resolution(xy_full)
 
         # Generate grid
         grid = self.M_global_movement.generate_grid_fixed(
@@ -250,26 +264,22 @@ class CortexModel(eqx.Module):
         from jax.scipy.ndimage import map_coordinates
 
         def grid_sample(img, grid_uv):
-            """Sample image using UV grid."""
+            """Sample image (B, C, H, W) at UV grid (B, 2, H', W') in [-1, 1]."""
             H, W = img.shape[2], img.shape[3]
-            grid_pixel = (grid_uv + 1) * jnp.array([[[[W - 1, H - 1]]]]) / 2
+            # (B, 2, H', W') -> (B, H', W', 2), then [-1,1] -> source pixel coords
+            # (align_corners=True convention, scaled by the *source* image size).
+            grid_perm = jnp.transpose(grid_uv, (0, 2, 3, 1))
+            grid_pixel = (grid_perm + 1) * jnp.array([[[[(W - 1) / 2, (H - 1) / 2]]]])
 
             def sample_batch_item(img_single, grid_single):
                 coords = jnp.stack([grid_single[:, :, 1], grid_single[:, :, 0]], axis=0)
-                # Sample all channels
-                channels = []
-                for c in range(img_single.shape[0]):
-                    sampled = map_coordinates(
-                        img_single[c],
-                        coords,
-                        order=1,
-                        mode='constant',
-                        cval=0
-                    )
-                    channels.append(sampled)
-                return jnp.stack(channels, axis=0)
+                # vmap over channels rather than a Python loop: keeps the traced
+                # graph small so XLA can fuse the gathers and reuse buffers.
+                return jax.vmap(
+                    lambda ch: map_coordinates(ch, coords, order=1, mode='constant', cval=0)
+                )(img_single)
 
-            return jax.vmap(sample_batch_item)(img, jnp.transpose(grid_pixel, (0, 2, 3, 1)))
+            return jax.vmap(sample_batch_item)(img, grid_pixel)
 
         internal_percept_sRGB = grid_sample(warped_ip_sRGB, uvs)
 

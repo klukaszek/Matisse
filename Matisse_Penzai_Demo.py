@@ -1,6 +1,6 @@
 import marimo
 
-__generated_with = "0.10.9"
+__generated_with = "0.19.4"
 app = marimo.App(width="full")
 
 
@@ -31,7 +31,6 @@ def _():
     from Simulated.Cortex import CortexModel
     from Simulated.Retina.helper.ColorSpaceTransform import ColorSpaceTransform
     return (
-        ColorSpaceTransform,
         CortexModel,
         RetinaModel,
         base64,
@@ -41,15 +40,12 @@ def _():
         io,
         jax,
         jnp,
-        mcolors,
         mo,
         np,
         os,
-        penzai,
         plt,
         pz,
         scipy,
-        sys,
         treescope,
     )
 
@@ -57,9 +53,37 @@ def _():
 @app.cell
 def _(base64, iio, io, mo, np, treescope):
     # Helper function to render with ArrayAutovisualizer for pretty array printing
-    def render_treescope(obj, height="600px"):
+    def render_treescope(obj, height="600px", autovisualizer=None):
         """Render object with treescope ArrayAutovisualizer in a marimo iframe."""
-        with treescope.active_autovisualizer.set_scoped(treescope.ArrayAutovisualizer()):
+        if autovisualizer is None:
+            autovisualizer = treescope.ArrayAutovisualizer()
+        with treescope.active_autovisualizer.set_scoped(autovisualizer):
+            html = treescope.render_to_html(obj)
+        return mo.iframe(html, height=height)
+
+    def render_treescope_full(
+        obj,
+        height="600px",
+        maximum_size=1_000_000,
+        cutoff_size_per_axis=512,
+        pixels_per_cell=1,
+    ):
+        """Render arrays without truncation at a fully zoomed-out scale."""
+        def _full_autovisualizer(value, path):
+            del path
+            adapter = treescope.type_registries.lookup_ndarray_adapter(value)
+            if adapter is None or not adapter.should_autovisualize(value):
+                return None
+            return treescope.IPythonVisualization(
+                treescope.render_array(
+                    value,
+                    truncate=False,
+                    pixels_per_cell=pixels_per_cell,
+                ),
+                replace=True,
+            )
+
+        with treescope.active_autovisualizer.set_scoped(_full_autovisualizer):
             html = treescope.render_to_html(obj)
         return mo.iframe(html, height=height)
 
@@ -93,52 +117,52 @@ def _(base64, iio, io, mo, np, treescope):
         b64 = base64.b64encode(buf.read()).decode('utf-8')
         html = f'<img src="data:image/gif;base64,{b64}" style="max-width:100%;" />'
         return mo.Html(html)
-
-    return create_gif, orient, render_treescope
+    return create_gif, orient, render_treescope_full
 
 
 @app.cell
 def _(mo):
-    mo.md(
-        """
-        # Matisse: Retina-Cortex Model Interpretability
+    mo.md("""
+    # Matisse: Retina-Cortex Model Interpretability
 
-        **A colorimetry and HCI research notebook for understanding simulated visual processing**
+    **A colorimetry and HCI research notebook for understanding simulated visual processing**
 
-        This notebook provides deep inspection of the Matisse model internals for:
-        - **Color science**: Spectral sensitivities, cone mosaics, chromatic adaptation
-        - **Visual neuroscience**: Foveation, lateral inhibition, eye movements
-        - **HCI applications**: Display quality evaluation, CVD simulation, environmental lighting effects
+    This notebook provides deep inspection of the Matisse model internals for:
+    - **Color science**: Spectral sensitivities, cone mosaics, chromatic adaptation
+    - **Visual neuroscience**: Foveation, lateral inhibition, eye movements
+    - **HCI applications**: Display quality evaluation, CVD simulation, environmental lighting effects
 
-        ---
+    ---
 
-        ## Notebook Structure
+    ## Notebook Structure
 
-        **Part A: Retina Model** - Forward visual processing simulation
-        1. Color Space Foundations (LMS, XYZ, sRGB transformations)
-        2. Cone Spectral Sensitivities & Mosaic Distribution
-        3. Spatial Sampling & Foveation (MIP-mapped sampling)
-        4. Lateral Inhibition (Center-surround, DoG kernel)
-        5. Complete Retina Pipeline Visualization
+    **Part A: Retina Model** - Forward visual processing simulation
+    1. Color Space Foundations (LMS, XYZ, sRGB transformations)
+    2. Cone Spectral Sensitivities & Mosaic Distribution
+    3. Spatial Sampling & Foveation (MIP-mapped sampling)
+    4. Lateral Inhibition (Center-surround, DoG kernel)
+    5. Complete Retina Pipeline Visualization
 
-        **Part B: Cortex Model** - Learned inverse model
-        1. Learned Cone Identity Function
-        2. Learned LI Deconvolution Kernel
-        3. Eye Movement Estimation (Coarse-to-fine pyramid)
-        4. RealNVP Coordinate Transforms
-        5. Internal Percept & Multi-timestep Integration
+    **Part B: Cortex Model** - Learned inverse model
+    1. Learned Cone Identity Function
+    2. Learned LI Deconvolution Kernel
+    3. Eye Movement Estimation (Coarse-to-fine pyramid)
+    4. RealNVP Coordinate Transforms
+    5. Internal Percept & Multi-timestep Integration
 
-        **Part C: End-to-End Analysis**
-        1. Validation on Real Hyperspectral Images
-        2. Quality Metrics & Reconstruction Fidelity
-        """
-    )
+    **Part C: End-to-End Analysis**
+    1. Validation on Real Hyperspectral Images
+    2. Quality Metrics & Reconstruction Fidelity
+    """)
     return
 
 
 @app.cell
 def _(mo):
-    mo.md("---\n# Configuration & Model Initialization")
+    mo.md("""
+    ---
+    # Configuration & Model Initialization
+    """)
     return
 
 
@@ -203,70 +227,60 @@ def _(CortexModel, RetinaModel, eqx, jax, mo, os):
         LATENT_DIM,
         MAX_SHIFT_SIZE,
         SIMULATION_SIZE,
-        TIMESTEPS_PER_IMAGE,
-        config_summary,
-        cortex_random,
         cortex_trained,
         key,
         retina,
     )
 
 
-# =============================================================================
-# PART A: RETINA MODEL
-# =============================================================================
-
-
 @app.cell
 def _(mo):
-    mo.md(
-        """
-        ---
-        # Part A: Retina Model Internals
+    mo.md("""
+    ---
+    # Part A: Retina Model Internals
 
-        The retina model simulates forward visual processing:
+    The retina model simulates forward visual processing:
 
-        ```
-        Input Image → Eye Motion → Spatial Sampling (Foveation) →
-        Spectral Sampling (Cone Mosaic) → Lateral Inhibition → Optic Nerve Signal
-        ```
-        """
-    )
+    ```
+    Input Image → Eye Motion → Spatial Sampling (Foveation) →
+    Spectral Sampling (Cone Mosaic) → Lateral Inhibition → Optic Nerve Signal
+    ```
+    """)
     return
 
 
 @app.cell
 def _(mo):
-    mo.md("## A.1 Model Architecture Overview")
+    mo.md("""
+    ## A.1 Model Architecture Overview
+    """)
     return
 
 
 @app.cell
-def _(render_treescope, retina):
-    render_treescope(retina, height="700px")
+def _(render_treescope_full, retina):
+    render_treescope_full(retina, height="700px", pixels_per_cell=1)
     return
 
 
 @app.cell
 def _(mo):
-    mo.md(
-        """
-        ## A.2 Color Space Foundations
+    mo.md("""
+    ## A.2 Color Space Foundations
 
-        The ColorSpaceTransform module handles conversions between:
-        - **sRGB**: Standard display color space (gamma-corrected)
-        - **Linear RGB**: Linear light values (no gamma)
-        - **CIE XYZ**: Device-independent color space
-        - **LMS**: Cone response space (Long, Medium, Short wavelength cones)
+    The ColorSpaceTransform module handles conversions between:
+    - **sRGB**: Standard display color space (gamma-corrected)
+    - **Linear RGB**: Linear light values (no gamma)
+    - **CIE XYZ**: Device-independent color space
+    - **LMS**: Cone response space (Long, Medium, Short wavelength cones)
 
-        These transformations are critical for accurate color rendering in HCI applications.
-        """
-    )
+    These transformations are critical for accurate color rendering in HCI applications.
+    """)
     return
 
 
 @app.cell
-def _(mo, np, plt, render_treescope, retina):
+def _(mo, np, plt, render_treescope_full, retina):
     # Extract color space transformation matrices
     _cst = retina.CST
 
@@ -326,12 +340,12 @@ def _(mo, np, plt, render_treescope, retina):
     _cst_output = mo.vstack([
         plt.gca(),
         mo.md("### Matrix Details (Treescope)"),
-        render_treescope({
+        render_treescope_full({
             "linsRGB_to_LMS": _linsrgb_to_lms,
             "LMS_to_linsRGB": _lms_to_linsrgb,
             "CIEXYZ_to_LMS": _xyz_to_lms,
             "white_point": np.array(_cst.white_point),
-        }, height="350px")
+        }, height="350px", pixels_per_cell=1)
     ])
     _cst_output
     return
@@ -339,19 +353,17 @@ def _(mo, np, plt, render_treescope, retina):
 
 @app.cell
 def _(mo):
-    mo.md(
-        """
-        ## A.3 Cone Spectral Sensitivities
+    mo.md("""
+    ## A.3 Cone Spectral Sensitivities
 
-        The cone fundamentals define how each cone type responds to different wavelengths.
-        Based on the Neitz & Neitz model with physiological parameters:
-        - **L cones**: Peak ~560nm (red-sensitive)
-        - **M cones**: Peak ~530nm (green-sensitive)
-        - **S cones**: Peak ~419nm (blue-sensitive)
+    The cone fundamentals define how each cone type responds to different wavelengths.
+    Based on the Neitz & Neitz model with physiological parameters:
+    - **L cones**: Peak ~560nm (red-sensitive)
+    - **M cones**: Peak ~530nm (green-sensitive)
+    - **S cones**: Peak ~419nm (blue-sensitive)
 
-        Understanding these is critical for CVD simulation and display calibration.
-        """
-    )
+    Understanding these is critical for CVD simulation and display calibration.
+    """)
     return
 
 
@@ -409,17 +421,15 @@ def _(mo, np, plt, retina):
 
 @app.cell
 def _(mo):
-    mo.md(
-        """
-        ## A.4 Cone Mosaic Distribution
+    mo.md("""
+    ## A.4 Cone Mosaic Distribution
 
-        The spatial arrangement of cones varies across the retina:
-        - **Fovea**: Dense packing, mostly L and M cones
-        - **Periphery**: Sparser, more S cones relatively
+    The spatial arrangement of cones varies across the retina:
+    - **Fovea**: Dense packing, mostly L and M cones
+    - **Periphery**: Sparser, more S cones relatively
 
-        The L:M ratio varies between individuals (~1.5:1 to 3:1).
-        """
-    )
+    The L:M ratio varies between individuals (~1.5:1 to 3:1).
+    """)
     return
 
 
@@ -485,24 +495,31 @@ def _(mo, np, plt, retina):
     """)
 
     mo.vstack([plt.gca(), _mosaic_stats])
-    return mosaic, mosaic_np
+    return (mosaic_np,)
 
 
 @app.cell
 def _(mo):
-    mo.md(
-        """
-        ## A.5 Mosaic-Weighted Spectral Response
+    mo.md("""
+    ## A.5 Mosaic-Weighted Spectral Response
 
-        The effective spectral sensitivity depends on both cone fundamentals AND mosaic composition.
-        This is what determines color discrimination ability for a given retina configuration.
-        """
-    )
+    The effective spectral sensitivity depends on both cone fundamentals AND mosaic composition.
+    This is what determines color discrimination ability for a given retina configuration.
+    """)
     return
 
 
 @app.cell
-def _(fundamentals, mo, mosaic_np, np, plt, pz, render_treescope, wavelengths):
+def _(
+    fundamentals,
+    mo,
+    mosaic_np,
+    np,
+    plt,
+    pz,
+    render_treescope_full,
+    wavelengths,
+):
     # Compute mosaic-weighted response
     _cone_weights = mosaic_np.mean(axis=(1, 2))
     _cone_weights = _cone_weights / (_cone_weights.sum() + 1e-12)
@@ -548,10 +565,10 @@ def _(fundamentals, mo, mosaic_np, np, plt, pz, render_treescope, wavelengths):
     _spectral_output = mo.vstack([
         plt.gca(),
         mo.md("### Penzai Named Arrays"),
-        render_treescope({
+        render_treescope_full({
             "cone_weights": _weights_named,
             "weighted_tuning": _tuning_named,
-        }, height="350px"),
+        }, height="350px", pixels_per_cell=1),
     ])
     _spectral_output
     return
@@ -559,20 +576,18 @@ def _(fundamentals, mo, mosaic_np, np, plt, pz, render_treescope, wavelengths):
 
 @app.cell
 def _(mo):
-    mo.md(
-        """
-        ## A.6 Lateral Inhibition (Center-Surround)
+    mo.md("""
+    ## A.6 Lateral Inhibition (Center-Surround)
 
-        The retina performs local contrast enhancement via center-surround receptive fields,
-        implemented as a Difference of Gaussians (DoG) filter. This is critical for edge detection
-        and spatial frequency processing.
-        """
-    )
+    The retina performs local contrast enhancement via center-surround receptive fields,
+    implemented as a Difference of Gaussians (DoG) filter. This is critical for edge detection
+    and spatial frequency processing.
+    """)
     return
 
 
 @app.cell
-def _(mo, np, plt, render_treescope, retina):
+def _(mo, np, plt, render_treescope_full, retina):
     # Get LI kernel (no arguments - kernel size is determined at init)
     _li = retina.LateralInhibition
     li_kernel = np.array(_li.get_LI_kernel())
@@ -623,49 +638,44 @@ def _(mo, np, plt, render_treescope, retina):
         plt.gca(),
         _li_stats,
         mo.md("### Kernel Details"),
-        render_treescope({"LI_kernel": li_kernel}, height="250px")
+        render_treescope_full({"LI_kernel": li_kernel}, height="250px", pixels_per_cell=1)
     ])
     return (li_kernel,)
 
 
-# =============================================================================
-# PART B: CORTEX MODEL
-# =============================================================================
-
-
 @app.cell
 def _(mo):
-    mo.md(
-        """
-        ---
-        # Part B: Cortex Model Internals
+    mo.md("""
+    ---
+    # Part B: Cortex Model Internals
 
-        The cortex model learns to invert retinal processing:
+    The cortex model learns to invert retinal processing:
 
-        ```
-        ONS → Deconvolve LI → Inject Cone Identity → Demosaic (UNet) → Internal Percept
-        ```
+    ```
+    ONS → Deconvolve LI → Inject Cone Identity → Demosaic (UNet) → Internal Percept
+    ```
 
-        Key learned components:
-        - **Cone Identity Function**: Which cone type is at each location
-        - **LI Deconvolution Kernel**: Inverse of lateral inhibition
-        - **Eye Movement Estimation**: Predicts gaze shifts between frames
-        - **RealNVP Coordinate Transform**: Maps regular grid to cone positions
-        """
-    )
+    Key learned components:
+    - **Cone Identity Function**: Which cone type is at each location
+    - **LI Deconvolution Kernel**: Inverse of lateral inhibition
+    - **Eye Movement Estimation**: Predicts gaze shifts between frames
+    - **RealNVP Coordinate Transform**: Maps regular grid to cone positions
+    """)
     return
 
 
 @app.cell
 def _(mo):
-    mo.md("## B.1 Cortex Architecture Overview")
+    mo.md("""
+    ## B.1 Cortex Architecture Overview
+    """)
     return
 
 
 @app.cell
-def _(cortex_trained, mo, render_treescope):
+def _(cortex_trained, mo, render_treescope_full):
     if cortex_trained is not None:
-        _b1_output = render_treescope(cortex_trained, height="800px")
+        _b1_output = render_treescope_full(cortex_trained, height="800px", pixels_per_cell=1)
     else:
         _b1_output = mo.md("*Trained cortex model not available.*")
     _b1_output
@@ -674,19 +684,17 @@ def _(cortex_trained, mo, render_treescope):
 
 @app.cell
 def _(mo):
-    mo.md(
-        """
-        ## B.2 Learned Cone Identity Function
+    mo.md("""
+    ## B.2 Learned Cone Identity Function
 
-        The cortex learns a latent representation of cone identity at each spatial location.
-        This is a (latent_dim, H, W) tensor that encodes which cone type is present.
-        """
-    )
+    The cortex learns a latent representation of cone identity at each spatial location.
+    This is a (latent_dim, H, W) tensor that encodes which cone type is present.
+    """)
     return
 
 
 @app.cell
-def _(cortex_trained, mo, np, plt, render_treescope):
+def _(cortex_trained, mo, np, plt, render_treescope_full):
     if cortex_trained is not None:
         # Get learned cone identity
         _cone_id = cortex_trained.C_cone_spectral_type.get_cone_identity_function()
@@ -710,7 +718,7 @@ def _(cortex_trained, mo, np, plt, render_treescope):
             mo.md("### Cone Identity Statistics"),
             mo.md(f"- Shape: {_cone_id_np.shape}"),
             mo.md(f"- Value Range: [{_cone_id_np.min():.4f}, {_cone_id_np.max():.4f}]"),
-            render_treescope({"cone_identity": _cone_id}, height="300px")
+            render_treescope_full({"cone_identity": _cone_id}, height="350px", pixels_per_cell=1)
         ])
     else:
         _b2_output = mo.md("*Trained cortex model not available.*")
@@ -720,15 +728,13 @@ def _(cortex_trained, mo, np, plt, render_treescope):
 
 @app.cell
 def _(mo):
-    mo.md(
-        """
-        ## B.3 Learned vs Ground Truth LI Kernel
+    mo.md("""
+    ## B.3 Learned vs Ground Truth LI Kernel
 
-        The cortex learns to deconvolve the lateral inhibition applied by the retina.
-        Comparing the learned kernel to the ground truth reveals how well the model
-        has recovered the retinal processing.
-        """
-    )
+    The cortex learns to deconvolve the lateral inhibition applied by the retina.
+    Comparing the learned kernel to the ground truth reveals how well the model
+    has recovered the retinal processing.
+    """)
     return
 
 
@@ -822,20 +828,18 @@ def _(cortex_trained, li_kernel, mo, np, plt, retina):
 
 @app.cell
 def _(mo):
-    mo.md(
-        """
-        ## B.4 RealNVP Coordinate Transform
+    mo.md("""
+    ## B.4 RealNVP Coordinate Transform
 
-        The cortex uses a RealNVP normalizing flow to learn the mapping from
-        a regular grid to the actual cone positions. This is invertible,
-        allowing both forward (grid → cones) and inverse (cones → grid) transforms.
-        """
-    )
+    The cortex uses a RealNVP normalizing flow to learn the mapping from
+    a regular grid to the actual cone positions. This is invertible,
+    allowing both forward (grid → cones) and inverse (cones → grid) transforms.
+    """)
     return
 
 
 @app.cell
-def _(SIMULATION_SIZE, cortex_trained, mo, np, plt):
+def _(SIMULATION_SIZE, cortex_trained, mo, np, pz, render_treescope_full):
     if cortex_trained is not None:
         # Get cell positions
         _p = cortex_trained.P_cell_position
@@ -843,34 +847,10 @@ def _(SIMULATION_SIZE, cortex_trained, mo, np, plt):
 
         # Reshape to grid
         _xy_grid = _xy_locs.reshape(SIMULATION_SIZE, SIMULATION_SIZE, 2)
-
-        _fig, _axes = plt.subplots(1, 3, figsize=(15, 5))
-
-        # X coordinates
-        _im0 = _axes[0].imshow(_xy_grid[:, :, 0], cmap='viridis')
-        _axes[0].set_title("Learned X Coordinates")
-        _axes[0].axis('off')
-        plt.colorbar(_im0, ax=_axes[0])
-
-        # Y coordinates
-        _im1 = _axes[1].imshow(_xy_grid[:, :, 1], cmap='viridis')
-        _axes[1].set_title("Learned Y Coordinates")
-        _axes[1].axis('off')
-        plt.colorbar(_im1, ax=_axes[1])
-
-        # Displacement from regular grid
         _regular_x = np.linspace(-1, 1, SIMULATION_SIZE)
         _regular_y = np.linspace(-1, 1, SIMULATION_SIZE)
         _regular_grid = np.stack(np.meshgrid(_regular_x, _regular_y), axis=-1)
-
         _displacement = np.sqrt(np.sum((_xy_grid - _regular_grid) ** 2, axis=-1))
-        _im2 = _axes[2].imshow(_displacement, cmap='hot')
-        _axes[2].set_title("Displacement from Regular Grid")
-        _axes[2].axis('off')
-        plt.colorbar(_im2, ax=_axes[2])
-
-        plt.suptitle("RealNVP Learned Coordinate Transform", fontsize=14, fontweight='bold')
-        plt.tight_layout()
 
         _coord_stats = mo.md(f"""
         **Coordinate Transform Statistics:**
@@ -881,38 +861,49 @@ def _(SIMULATION_SIZE, cortex_trained, mo, np, plt):
         - Max Displacement: {_displacement.max():.4f}
         """)
 
-        _b4_output = mo.vstack([plt.gca(), _coord_stats])
+        _treescope_matrices = {
+            "x_coords": pz.nx.wrap(_xy_grid[:, :, 0], "y", "x"),
+            "y_coords": pz.nx.wrap(_xy_grid[:, :, 1], "y", "x"),
+            "displacement": pz.nx.wrap(_displacement, "y", "x"),
+        }
+        _treescope_view = mo.vstack([
+            mo.md("### Matrix Inspection (Penzai/Treescope)"),
+            render_treescope_full(
+                _treescope_matrices,
+                height="500px",
+                maximum_size=SIMULATION_SIZE * SIMULATION_SIZE + 1,
+                cutoff_size_per_axis=SIMULATION_SIZE,
+                pixels_per_cell=1,
+            ),
+        ])
+
+        _b4_output = mo.vstack([_coord_stats, _treescope_view])
     else:
         _b4_output = mo.md("*Trained cortex model not available.*")
     _b4_output
     return
 
 
-# =============================================================================
-# PART C: END-TO-END ANALYSIS
-# =============================================================================
-
-
 @app.cell
 def _(mo):
-    mo.md(
-        """
-        ---
-        # Part C: End-to-End Pipeline Analysis
+    mo.md("""
+    ---
+    # Part C: End-to-End Pipeline Analysis
 
-        Now we run complete forward+inverse passes to analyze:
-        1. Retina processing stages
-        2. Eye movement tracking across timesteps
-        3. Cortex decoding quality
-        4. Multi-timestep integration
-        """
-    )
+    Now we run complete forward+inverse passes to analyze:
+    1. Retina processing stages
+    2. Eye movement tracking across timesteps
+    3. Cortex decoding quality
+    4. Multi-timestep integration
+    """)
     return
 
 
 @app.cell
 def _(mo):
-    mo.md("## C.1 Validation Image Selection")
+    mo.md("""
+    ## C.1 Validation Image Selection
+    """)
     return
 
 
@@ -932,7 +923,9 @@ def _(MAX_SHIFT_SIZE, h5py, image_selector, jnp, mo, np, os, retina, scipy):
     # Load and process validation image
     _image_id = image_selector.value
     _spectral_path = f"Dataset/ARAD_1K_Mirror/Valid_spectral/ARAD_1K_{_image_id:04d}.mat"
-    _rgb_path = f"Dataset/ARAD_1K_Mirror/Valid_RGB/Valid_RGB/ARAD_1K_{_image_id:04d}.jpg"
+    _rgb_path = f"Dataset/ARAD_1K_Mirror/Valid_RGB/ARAD_1K_{_image_id:04d}.jpg"
+
+    print(f"Loading spectral data from: {_spectral_path}")
 
     if os.path.exists(_spectral_path):
         # Load hyperspectral data
@@ -979,18 +972,20 @@ def _(MAX_SHIFT_SIZE, h5py, image_selector, jnp, mo, np, os, retina, scipy):
     if rgb_image_path:
         _ref_output = mo.vstack([
             mo.md(f"**Reference RGB Image: ARAD_1K_{_image_id:04d}**"),
-            mo.image(src=rgb_image_path)
+            mo.image(src=rgb_image_path, width=400)
         ])
     else:
         _ref_output = mo.md("*Reference RGB image not found.*")
 
     _ref_output
-    return rgb_image_path, valid_lms
+    return (valid_lms,)
 
 
 @app.cell
 def _(mo):
-    mo.md("## C.2 Retina Processing Pipeline")
+    mo.md("""
+    ## C.2 Retina Processing Pipeline
+    """)
     return
 
 
@@ -1063,25 +1058,29 @@ def _(jax, key, mo, np, orient, plt, retina, valid_lms):
         retina_output = mo.md("*Validation data not available.*")
 
     retina_output
-    return (
-        retina_bipolar,
-        retina_dxy,
-        retina_LMS_FoV,
-        retina_ons,
-        retina_output,
-        retina_pa,
-        retina_warped_LMS,
-    )
+    return retina_LMS_FoV, retina_dxy, retina_ons, retina_warped_LMS
 
 
 @app.cell
 def _(mo):
-    mo.md("## C.3 Eye Movement Analysis (Multi-Timestep)")
+    mo.md("""
+    ## C.3 Eye Movement Analysis (Multi-Timestep)
+    """)
     return
 
 
 @app.cell
-def _(TIMESTEPS_PER_IMAGE, create_gif, mo, np, orient, plt, retina, retina_LMS_FoV, retina_dxy, retina_ons):
+def _(
+    create_gif,
+    mo,
+    np,
+    orient,
+    plt,
+    retina,
+    retina_LMS_FoV,
+    retina_dxy,
+    retina_ons,
+):
     if retina_ons is not None:
         _dxy_np = np.array(retina_dxy[0])  # (T-1, 2)
         _n_moves = _dxy_np.shape[0]
@@ -1106,6 +1105,12 @@ def _(TIMESTEPS_PER_IMAGE, create_gif, mo, np, orient, plt, retina, retina_LMS_F
         # Create GIFs
         _fov_gif = create_gif(_fov_frames, fps=2)
         _ons_gif = create_gif(_ons_frames, fps=2)
+        _fov_gif = mo.Html(
+            f'<div style="max-width:400px">{_fov_gif._text}</div>'
+        )
+        _ons_gif = mo.Html(
+            f'<div style="max-width:400px">{_ons_gif._text}</div>'
+        )
 
         # Create static analysis plots
         _fig, _axes = plt.subplots(1, 3, figsize=(15, 5))
@@ -1172,12 +1177,24 @@ def _(TIMESTEPS_PER_IMAGE, create_gif, mo, np, orient, plt, retina, retina_LMS_F
 
 @app.cell
 def _(mo):
-    mo.md("## C.4 Cortex Decoding (Multi-Timestep)")
+    mo.md("""
+    ## C.4 Cortex Decoding (Multi-Timestep)
+    """)
     return
 
 
 @app.cell
-def _(cortex_trained, create_gif, mo, np, orient, plt, render_treescope, retina, retina_ons):
+def _(
+    cortex_trained,
+    create_gif,
+    mo,
+    np,
+    orient,
+    plt,
+    render_treescope_full,
+    retina,
+    retina_ons,
+):
     if retina_ons is not None and cortex_trained is not None:
         # Decode each timestep
         _n_timesteps = retina_ons.shape[1]
@@ -1200,6 +1217,9 @@ def _(cortex_trained, create_gif, mo, np, orient, plt, render_treescope, retina,
 
         # Create GIF of decoded RGB
         _decoded_gif = create_gif(_decoded_rgb_frames, fps=2)
+        _decoded_gif = mo.Html(
+            f'<div style="max-width:400px">{_decoded_gif._text}</div>'
+        )
 
         # Visualize all timesteps side by side
         _n_show = min(_n_timesteps, 4)
@@ -1235,7 +1255,7 @@ def _(cortex_trained, create_gif, mo, np, orient, plt, render_treescope, retina,
             mo.md("### Static Comparison (All Timesteps)"),
             plt.gca(),
             mo.md("### Decoded Tensors (All Timesteps)"),
-            render_treescope(_treescope_data, height="600px")
+            render_treescope_full(_treescope_data, height="600px", pixels_per_cell=1)
         ])
     else:
         _c4_output = mo.md("*Cortex or retina outputs not available.*")
@@ -1245,7 +1265,9 @@ def _(cortex_trained, create_gif, mo, np, orient, plt, render_treescope, retina,
 
 @app.cell
 def _(mo):
-    mo.md("## C.5 Internal Percept Latent Space")
+    mo.md("""
+    ## C.5 Internal Percept Latent Space
+    """)
     return
 
 
@@ -1288,18 +1310,25 @@ def _(LATENT_DIM, cortex_trained, mo, np, orient, plt, retina_ons):
 
 @app.cell
 def _(mo):
-    mo.md(
-        """
-        ## C.6 Reconstruction Quality Analysis
+    mo.md("""
+    ## C.6 Reconstruction Quality Analysis
 
-        Compare the ground truth FoV to the cortex reconstruction.
-        """
-    )
+    Compare the ground truth FoV to the cortex reconstruction.
+    """)
     return
 
 
 @app.cell
-def _(cortex_trained, mo, np, orient, plt, retina, retina_ons, retina_warped_LMS):
+def _(
+    cortex_trained,
+    mo,
+    np,
+    orient,
+    plt,
+    retina,
+    retina_ons,
+    retina_warped_LMS,
+):
     if retina_ons is not None and cortex_trained is not None:
         # Ground truth: Spatially sampled LMS (same size as simulation: 256x256)
         # Using retina_warped_LMS instead of retina_LMS_FoV to match cortex output size
@@ -1367,32 +1396,30 @@ def _(cortex_trained, mo, np, orient, plt, retina, retina_ons, retina_warped_LMS
 
 @app.cell
 def _(mo):
-    mo.md(
-        """
-        ---
-        ## Summary
+    mo.md("""
+    ---
+    ## Summary
 
-        This notebook provides comprehensive inspection of the Matisse retina-cortex model:
+    This notebook provides comprehensive inspection of the Matisse retina-cortex model:
 
-        **Retina (Forward Model):**
-        - Color space transformations (sRGB ↔ LMS ↔ XYZ)
-        - Cone spectral sensitivities and spatial mosaic distribution
-        - Foveated spatial sampling with MIP-mapped resolution falloff
-        - Lateral inhibition via DoG center-surround processing
+    **Retina (Forward Model):**
+    - Color space transformations (sRGB ↔ LMS ↔ XYZ)
+    - Cone spectral sensitivities and spatial mosaic distribution
+    - Foveated spatial sampling with MIP-mapped resolution falloff
+    - Lateral inhibition via DoG center-surround processing
 
-        **Cortex (Inverse Model):**
-        - Learned cone identity function in latent space
-        - Learned LI deconvolution kernel (comparison to ground truth)
-        - RealNVP coordinate transforms for cone position mapping
-        - Multi-timestep eye movement tracking
+    **Cortex (Inverse Model):**
+    - Learned cone identity function in latent space
+    - Learned LI deconvolution kernel (comparison to ground truth)
+    - RealNVP coordinate transforms for cone position mapping
+    - Multi-timestep eye movement tracking
 
-        **For HCI/Display Research:**
-        - The model provides a differentiable pipeline from display output to perceived image
-        - Can be used to evaluate display quality under different viewing conditions
-        - Supports CVD simulation by modifying cone mosaic composition
-        - Eye movement integration reveals temporal aspects of perception
-        """
-    )
+    **For HCI/Display Research:**
+    - The model provides a differentiable pipeline from display output to perceived image
+    - Can be used to evaluate display quality under different viewing conditions
+    - Supports CVD simulation by modifying cone mosaic composition
+    - Eye movement integration reveals temporal aspects of perception
+    """)
     return
 
 

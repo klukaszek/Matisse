@@ -20,10 +20,12 @@ assets/cell_position/data/*_4000.cpkl
 
 Experiment/LearnedWeights/
 
+Matisse_OG/
 Tutorials/data/LP/
 Assets/cell_position/data/*_4000.cpkl
 Dataset/tinyNTIRE_*
 Dataset/tinyNTIRE2022_interpolated
+
 
 Website
 Dataset/ImageNet_*
