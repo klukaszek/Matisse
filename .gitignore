@@ -1,4 +1,5 @@
 __pycache__/
+__marimo__/
 */__pycache__/
 **/__pycache__/
 *.py[cod]
@@ -20,7 +21,7 @@ assets/cell_position/data/*_4000.cpkl
 
 Experiment/LearnedWeights/
 
-Matisse_OG/
+# Matisse_OG/
 Tutorials/data/LP/
 Assets/cell_position/data/*_4000.cpkl
 Dataset/tinyNTIRE_*
