@@ -33,7 +33,13 @@ def train_cortical_model(params):
 
     # Instantiate the cortex simulation model
     cortex          = CortexModel(params, DEVICE)
-    cortex          = torch.compile(cortex)
+    # The training hot path calls cortex.main_train (not forward), so compiling
+    # the module (torch.compile(cortex)) only instruments forward/__call__ and
+    # leaves main_train — the entire differentiated path — running eagerly.
+    # Compile main_train directly, but only on CUDA: inductor's MPS backend
+    # cannot codegen this fused graph (Metal's ~31 buffer-argument limit).
+    if DEVICE == 'cuda:0':
+        cortex.main_train = torch.compile(cortex.main_train)
 
     # Prepare the dataset
     dataset         = create_dataset(params['Dataset']['dataset_name'], params, retina)

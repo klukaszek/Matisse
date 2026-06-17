@@ -40,8 +40,10 @@ class ColorSpaceTransform():
         # if not tetrachromatic
         if not self.is_tetrachromatic:
             self.LMS_to_linsRGB_matrix = torch.linalg.inv(self.linsRGB_to_LMS_matrix[:, :3])
-            if self.device == 'mps:0': # MPS incorrectly handles the inverse of a matrix
-                self.LMS_to_linsRGB_matrix = self.LMS_to_linsRGB_matrix.T
+            # NOTE: older torch (~2.5) returned the transpose of linalg.inv on
+            # MPS, which this used to "fix" with a .T. torch>=2.12 returns the
+            # correct inverse on MPS, so transposing now corrupts the matrix
+            # (mixing RGB channels -> magenta percepts). No transpose needed.
             # pad with zeros (3x3 -> 4x3 matrix)
             zeros = torch.zeros(1, 3).to(self.device)
             self.LMS_to_linsRGB_matrix = torch.cat([self.LMS_to_linsRGB_matrix, zeros], dim=0)

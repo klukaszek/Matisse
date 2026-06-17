@@ -13,7 +13,8 @@ class DefaultDemosaicing(AbstractDemosaicing):
         self.demosaicing = UNet(dim_latent=params['CorticalModel']['latent_dim']).to(device=self.device)
 
     def demosaic(self, C_encoded_pa):
-        ip = self.demosaicing(C_encoded_pa)
+        # channels_last is slower than contiguous for conv backward on MPS.
+        ip = self.demosaicing(C_encoded_pa.contiguous())
         return ip
 
 
@@ -50,9 +51,9 @@ class DoubleConv(nn.Module):
             mid_channels = out_channels
 
         self.double_conv = nn.Sequential(
-            nn.Conv2d(in_channels, mid_channels, kernel_size=3, padding=1, padding_mode='reflect', bias=False).to(memory_format=torch.channels_last),
+            nn.Conv2d(in_channels, mid_channels, kernel_size=3, padding=1, padding_mode='reflect', bias=False),
             nn.ReLU(inplace=True),
-            nn.Conv2d(mid_channels, out_channels, kernel_size=3, padding=1, padding_mode='reflect', bias=False).to(memory_format=torch.channels_last),
+            nn.Conv2d(mid_channels, out_channels, kernel_size=3, padding=1, padding_mode='reflect', bias=False),
             nn.ReLU(inplace=True)
         )
 
@@ -95,7 +96,7 @@ class Up(nn.Module):
 class OutConv(nn.Module):
     def __init__(self, in_channels, out_channels):
         super(OutConv, self).__init__()
-        self.conv = nn.Conv2d(in_channels, out_channels, kernel_size=1).to(memory_format=torch.channels_last)
+        self.conv = nn.Conv2d(in_channels, out_channels, kernel_size=1)
 
     def forward(self, x):
         x = self.conv(x)

@@ -2,6 +2,7 @@ import torch
 import numpy as np
 import normflows as nf
 import torch.nn.functional as F
+from Experiment.helper import bilinear_grid_sample
 from Simulated.Cortex.P_cell_position.P_Abstract import AbstractCellPosition
 from . import register_class
 
@@ -54,7 +55,12 @@ class DefaultCellPosition(AbstractCellPosition):
         translated1 = xy + pred_dxy.reshape(-1, 2, 1, 1)
 
         grid1 = self.get_UV_locations(translated1).permute(0,2,3,1)
-        ip2_pred = F.grid_sample(ip1, grid1, align_corners=True, mode='bilinear', padding_mode='zeros')
-        mask2 = F.grid_sample(self.mask, grid1, align_corners=True, mode='nearest', padding_mode='zeros')
-        
+        # Manual bilinear sampler keeps the backward pass on-device; MPS lacks
+        # aten::grid_sampler_2d_backward and would otherwise fall back to CPU.
+        ip2_pred = bilinear_grid_sample(ip1, grid1, align_corners=True)
+        # The mask is nearest-sampled (piecewise-constant => ~zero gradient
+        # w.r.t. the grid), so sample it without grad to avoid the same fallback.
+        with torch.no_grad():
+            mask2 = F.grid_sample(self.mask, grid1, align_corners=True, mode='nearest', padding_mode='zeros')
+
         return ip2_pred, mask2

@@ -36,3 +36,7 @@ Tutorials/RetinaSimulation/Results
 
 Dataset/FullColors*
 Dataset/HueSphere*
+
+# Local-only intermediary artifacts (kept on disk, not committed)
+Dataset/ARAD_*_LMS
+tests/profile_train.py

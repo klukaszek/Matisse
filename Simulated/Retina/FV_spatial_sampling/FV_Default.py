@@ -34,16 +34,10 @@ class DefaultSpatialSampling(AbstractSpatialSampling):
         self.dl = self.dl.unsqueeze(0).unsqueeze(0).unsqueeze(0)
         self.du = self.du.unsqueeze(0).unsqueeze(0).unsqueeze(0)
 
-        if self.device == 'mps:0':
-            self.grid = self.grid.to('cpu')
-
 
     def forward(self, im0):
-        (BS, N, C, Hm, Wm) = im0.shape 
+        (BS, N, C, Hm, Wm) = im0.shape
         D = self.optic_nerve_signal_dim
-
-        if self.device == 'mps:0':
-            im0 = im0.to('cpu')
 
         mip = []
         DIV = 1
@@ -54,8 +48,6 @@ class DefaultSpatialSampling(AbstractSpatialSampling):
             DIV *= 2
 
         mip = torch.stack(mip, 0)
-        if self.device == 'mps:0':
-            mip = mip.to('mps:0')
 
         l = torch.sum(self.ll * mip, 0)
         u = torch.sum(self.ul * mip, 0)

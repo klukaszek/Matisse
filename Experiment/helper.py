@@ -1,5 +1,51 @@
 import numpy as np
+import torch.nn.functional as F
 from root_config import *
+
+
+def bilinear_grid_sample(input, grid, align_corners=True):
+    """Differentiable bilinear sampler equivalent to
+    F.grid_sample(..., mode='bilinear', padding_mode='zeros'), built from ops
+    with full MPS forward+backward support.
+
+    MPS has no aten::grid_sampler_2d_backward, so F.grid_sample silently falls
+    back to CPU on the backward pass. This keeps the whole warp on-device.
+
+    input: (N, C, H, W)   grid: (N, Ho, Wo, 2), last dim = (x, y) in [-1, 1]
+    """
+    N, C, H, W = input.shape
+    _, Ho, Wo, _ = grid.shape
+
+    x = grid[..., 0]
+    y = grid[..., 1]
+    if align_corners:
+        ix = (x + 1) * 0.5 * (W - 1)
+        iy = (y + 1) * 0.5 * (H - 1)
+    else:
+        ix = ((x + 1) * W - 1) * 0.5
+        iy = ((y + 1) * H - 1) * 0.5
+
+    ix0 = torch.floor(ix)
+    iy0 = torch.floor(iy)
+    wx1 = ix - ix0
+    wx0 = 1 - wx1
+    wy1 = iy - iy0
+    wy0 = 1 - wy1
+
+    flat = input.reshape(N, C, H * W)
+
+    def corner(ixc, iyc):
+        in_bounds = (ixc >= 0) & (ixc <= W - 1) & (iyc >= 0) & (iyc <= H - 1)
+        ixc = ixc.clamp(0, W - 1).long()
+        iyc = iyc.clamp(0, H - 1).long()
+        idx = (iyc * W + ixc).reshape(N, 1, Ho * Wo).expand(N, C, -1)
+        vals = torch.gather(flat, 2, idx).reshape(N, C, Ho, Wo)
+        return vals * in_bounds.unsqueeze(1).to(vals.dtype)
+
+    return (corner(ix0, iy0) * (wx0 * wy0).unsqueeze(1)
+            + corner(ix0 + 1, iy0) * (wx1 * wy0).unsqueeze(1)
+            + corner(ix0, iy0 + 1) * (wx0 * wy1).unsqueeze(1)
+            + corner(ix0 + 1, iy0 + 1) * (wx1 * wy1).unsqueeze(1))
 
 
 def generate_model_name(params):
