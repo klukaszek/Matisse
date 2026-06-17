@@ -37,6 +37,7 @@ Tutorials/RetinaSimulation/Results
 Dataset/FullColors*
 Dataset/HueSphere*
 
-# Local-only intermediary artifacts (kept on disk, not committed)
+# Local-only data symlinks / generated caches (kept on disk, not committed)
+Dataset/ARAD_1K_Mirror
 Dataset/ARAD_*_LMS
 tests/profile_train.py
