@@ -277,8 +277,14 @@ class DefaultCellPosition(eqx.Module):
         Returns:
             Warped XY coordinates of shape (1, 2, H, W)
         """
-        # Permute to (..., 2) format for RealNVP
-        grid_flat = jnp.transpose(self.regular_grid_uv[0], (1, 2, 0))  # (H, W, 2)
+        # Permute to (..., 2) format for RealNVP.
+        # regular_grid_uv is a FIXED base lattice (the torch reference stores it
+        # as a plain tensor attribute, not an nn.Parameter, so the optimizer
+        # never updates it). In equinox it is an array field => a differentiable
+        # leaf, and train.py marks the whole P_cell_position subtree trainable,
+        # so without this stop_gradient the base grid drifts under Adam and the
+        # learned warp becomes wavy (over-warped percepts).
+        grid_flat = jnp.transpose(jax.lax.stop_gradient(self.regular_grid_uv)[0], (1, 2, 0))  # (H, W, 2)
 
         # Apply forward transformation
         xy_flat = jax.vmap(jax.vmap(self.RealNVP.forward))(grid_flat)  # (H, W, 2)
