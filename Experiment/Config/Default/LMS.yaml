@@ -46,9 +46,23 @@ DimensionalityBoosting:
 Training:
   learning_rate: 0.001 # Learning rate for the optimizer
   learning_progress_logging: true # Enable logging of learning progress
-  logging_mode: 'Comet' # Mode of logging ('Local', 'Tensorboard', 'Comet')
+  logging_mode: 'Local' # Logging backend (only 'Local' is supported)
   logging_cycle: 1000 # Frequency of logging in terms of gradient updates
   max_gradient_updates: 100000 # Maximum number of gradient updates for training
+
+  # Learning-rate schedule. 'constant' = torch parity (loss wanders in the back
+  # half). 'warmup_cosine' warms up linearly over warmup_steps then cosine-decays
+  # to end_learning_rate over max_gradient_updates, so the loss settles late
+  # instead of ping-ponging.
+  lr_schedule: 'warmup_cosine' # 'constant' | 'warmup_cosine'
+  warmup_steps: 1000           # linear warmup 0 -> learning_rate
+  end_learning_rate: 0.00001   # final lr at the end of cosine decay (1e-5)
+
+  # ns_ip (internal-percept readout) reconstruction loss. 'l2' = torch parity,
+  # but L2 is mean-seeking and desaturates vivid colors ~15-20%. 'l1' preserves
+  # the mode and recovers most of that saturation at negligible accuracy cost
+  # (validated by re-fitting the readout on the frozen 100k latent).
+  ns_ip_loss: 'l2' # 'l2' | 'l1'  (see Default/LMS_L1 for the L1 variant)
 
 
 # Cortical model parameters

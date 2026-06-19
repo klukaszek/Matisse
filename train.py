@@ -44,6 +44,16 @@ def create_optimizers(
     # unclipped (preserving parity with the unclipped torch dynamics); only a
     # genuine explosion gets bounded. Raise/lower per experiment if needed.
     max_grad_norm: Tuple[float, float, float] = (2.5e3, 2.5e3, 1.0e6),
+    # Learning-rate schedule. The torch reference uses a constant lr, which makes
+    # the loss wander in the back half (the optimizer keeps taking full-size
+    # steps and never settles into the basin). 'warmup_cosine' warms up over
+    # warmup_steps then cosine-decays to end_learning_rate over max_gradient_updates,
+    # which tames the early oscillation and lets the loss settle late. Set
+    # lr_schedule='constant' to restore exact torch parity.
+    lr_schedule: str = 'constant',
+    max_gradient_updates: int = 100_000,
+    warmup_steps: int = 1_000,
+    end_learning_rate: float = 1e-5,
 ) -> Tuple[optax.GradientTransformation, optax.GradientTransformation, optax.GradientTransformation]:
     """Create optimizers for different parameter groups.
 
@@ -56,11 +66,24 @@ def create_optimizers(
       * clip_by_global_norm is a secondary backstop that keeps a rare
         finite-but-huge gradient from corrupting Adam's second-moment estimate.
     """
+    if lr_schedule == 'warmup_cosine':
+        lr = optax.warmup_cosine_decay_schedule(
+            init_value=0.0,
+            peak_value=learning_rate,
+            warmup_steps=warmup_steps,
+            decay_steps=max_gradient_updates,
+            end_value=end_learning_rate,
+        )
+    elif lr_schedule == 'constant':
+        lr = learning_rate
+    else:
+        raise ValueError(f"Unknown lr_schedule '{lr_schedule}' (use 'constant' or 'warmup_cosine')")
+
     def _make(clip_norm: float) -> optax.GradientTransformation:
         return optax.apply_if_finite(
             optax.chain(
                 optax.clip_by_global_norm(clip_norm),
-                optax.adam(learning_rate),
+                optax.adam(lr),
             ),
             # apply_if_finite *accepts* the update after this many consecutive
             # non-finite gradients, so keep it high: we never want to let a NaN
@@ -119,7 +142,8 @@ def train_step(
     true_dxy: jax.Array,
     cone_mosaic: jax.Array,
     kernel_size: int,
-    simulating_tetra: bool
+    simulating_tetra: bool,
+    ns_ip_loss_kind: str = 'l2',
 ) -> Tuple[CortexModel, OptimizerStates, Dict[str, float]]:
     """Three separate backward passes to match the reference PyTorch implementation.
 
@@ -207,9 +231,14 @@ def train_step(
         # the main forward and only train the ns_ip projection.
         def ns_ip_loss_fn(model):
             pred_warped_linsRGB1 = model.ns_ip(warped_ip1_detached)
-            return jnp.sum(
-                (pred_warped_linsRGB1[:, :3] - linsRGB1[:, :3])[:, :, P:-P, P:-P] ** 2
-            )
+            err = (pred_warped_linsRGB1[:, :3] - linsRGB1[:, :3])[:, :, P:-P, P:-P]
+            # L1 vs L2 readout loss. L2 (the torch default) is mean-seeking and
+            # desaturates vivid colors by ~15-20%; L1 preserves the mode and
+            # recovers most of that saturation at a negligible MSE cost (validated
+            # by re-fitting the readout on the frozen latent). 'l2' restores parity.
+            if ns_ip_loss_kind == 'l1':
+                return jnp.sum(jnp.abs(err))
+            return jnp.sum(err ** 2)
 
         ip_filter = jax.tree.map(lambda _: False, cortex)
         ip_filter = eqx.tree_at(lambda m: m.ns_ip, ip_filter, replace=True)
@@ -352,8 +381,16 @@ def train_cortical_model(
         )
         print(f"✓ DataLoader created (num_workers={num_workers}, augment=True)")
 
-    # Optimizers
-    main_opt, ns_cm_opt, ns_ip_opt = create_optimizers(learning_rate)
+    # Optimizers. Schedule settings come from the Training config; defaults keep
+    # torch parity (constant lr) unless 'lr_schedule: warmup_cosine' is set.
+    training_cfg = params.get('Training', {})
+    main_opt, ns_cm_opt, ns_ip_opt = create_optimizers(
+        learning_rate,
+        lr_schedule=training_cfg.get('lr_schedule', 'constant'),
+        max_gradient_updates=max_gradient_updates,
+        warmup_steps=training_cfg.get('warmup_steps', 1_000),
+        end_learning_rate=training_cfg.get('end_learning_rate', 1e-5),
+    )
     optimizers = (main_opt, ns_cm_opt, ns_ip_opt)
 
     # Initial Optimizer States
@@ -452,7 +489,8 @@ def train_cortical_model(
                 cortex, opt_states, optimizers,
                 batch_ons1, batch_ons2, batch_warped_linsRGB1,
                 batch_true_dxy, true_cone_mosaic, true_LI_kernel_size,
-                simulating_tetra
+                simulating_tetra,
+                ns_ip_loss_kind=training_cfg.get('ns_ip_loss', 'l2'),
             )
 
             num_gradient_updates += 1

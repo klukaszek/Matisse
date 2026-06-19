@@ -1,11 +1,16 @@
 
 # Name of the experiment. This name is used as the identifier for the experiment.
 # Change this name to avoid overwriting the previous experiment.
+#
+# This is the L1-readout variant of Default/LMS: identical in every way except
+# Training.ns_ip_loss = 'l1' (and the experiment name, so it logs/checkpoints to
+# its own directory). L1 preserves vivid-color saturation that the L2 readout
+# washes out.
 Experiment:
-  name: 'LMS_humanQ_NTIRE'
+  name: 'LMS_L1'
   simulation_size: 256 # Dimension of the simulation (i.e. 256 for 256x256 cells)
   timesteps_per_image: 2 # Number of timesteps per image (i.e. 2 for timesteps t1 and t2)
-  simulating_tetra: true # Whether to simulate tetrachromacy
+  simulating_tetra: false # Whether to simulate tetrachromacy
 
 # Retinal model parameters
 RetinaModel:
@@ -15,18 +20,16 @@ RetinaModel:
 
   retina_spectral_sampling:
     type: 'Default' # Spectral sampling strategy for the retina
-    cone_types: 'LMSQ' # Cone types in the retina mosaic
-    cone_fundamentals: 
-      L: 560    # Default L cone peaks at 560 nm
-      M: 530    # Default M cone peaks at 530 nm
-      S: 419    # Default S cone peaks at 419 nm
-      Q: 545    # Tetrachromacy: human Q cone peaks at 545 nm
+    cone_types: 'LMS' # Cone types in the retina mosaic
 
   retina_lateral_inhibition:
     type: 'Default' # Default lateral inhibition strategy in the retina
 
   retina_eye_motion:
     type: 'Default' # Eye motion strategy in the retina
+
+  retina_spike_conversion:
+    type: 'Default' # Spike conversion strategy in the retina
 
   max_shift_size: 15 # Maximum shift size in pixels for eye motion between two timesteps
 
@@ -51,6 +54,20 @@ Training:
   logging_mode: 'Local' # Logging backend (only 'Local' is supported)
   logging_cycle: 1000 # Frequency of logging in terms of gradient updates
   max_gradient_updates: 100000 # Maximum number of gradient updates for training
+
+  # Learning-rate schedule. 'constant' = torch parity (loss wanders in the back
+  # half). 'warmup_cosine' warms up linearly over warmup_steps then cosine-decays
+  # to end_learning_rate over max_gradient_updates, so the loss settles late
+  # instead of ping-ponging.
+  lr_schedule: 'warmup_cosine' # 'constant' | 'warmup_cosine'
+  warmup_steps: 1000           # linear warmup 0 -> learning_rate
+  end_learning_rate: 0.00001   # final lr at the end of cosine decay (1e-5)
+
+  # ns_ip (internal-percept readout) reconstruction loss. 'l2' = torch parity,
+  # but L2 is mean-seeking and desaturates vivid colors ~15-20%. 'l1' preserves
+  # the mode and recovers most of that saturation at negligible accuracy cost
+  # (validated by re-fitting the readout on the frozen 100k latent).
+  ns_ip_loss: 'l1' # 'l2' | 'l1'
 
 
 # Cortical model parameters

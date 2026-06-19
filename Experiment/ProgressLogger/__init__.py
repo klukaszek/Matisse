@@ -1,7 +1,7 @@
 """JAX/Equinox implementation of Local Progress Logger.
 
 Mirrors the original PyTorch Local logger but adapted for JAX/Equinox.
-Drops Comet and TensorBoard support entirely.
+Local file-based logging only (no external experiment-tracker backends).
 
 Logs:
 - main_loss.png: Log-scale loss curve over gradient updates

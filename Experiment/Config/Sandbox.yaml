@@ -45,7 +45,7 @@ DimensionalityBoosting:
 Training:
   learning_rate: 0.001 # Learning rate for the optimizer
   learning_progress_logging: true # Enable logging of learning progress
-  logging_mode: 'Local' # Mode of logging ('Local', 'Tensorboard', 'Comet')
+  logging_mode: 'Local' # Logging backend (only 'Local' is supported)
   logging_cycle: 1000 # Frequency of logging in terms of gradient updates
   max_gradient_updates: 100000 # Maximum number of gradient updates for training
 

@@ -3,7 +3,6 @@ __marimo__/
 */__pycache__/
 **/__pycache__/
 *.py[cod]
-.comet.config
 .DS_Store
 */.DS_Store
 **/.DS_Store
