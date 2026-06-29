@@ -1,5 +1,6 @@
 "JAX/Equinox/Optax training loop for Matisse cortical model."
 import os
+import json
 
 # Disable JAX GPU memory preallocation - must be set before importing JAX
 os.environ['XLA_PYTHON_CLIENT_PREALLOCATE'] = 'false'
@@ -33,6 +34,32 @@ class OptimizerStates(NamedTuple):
     main: optax.OptState
     ns_cm: optax.OptState
     ns_ip: optax.OptState
+
+
+def tree_l2_norm(tree) -> jax.Array:
+    """Compute an L2 norm over all array leaves in a parameter subtree."""
+    leaves = [leaf for leaf in jax.tree.leaves(tree) if eqx.is_array(leaf)]
+    if not leaves:
+        return jnp.array(0.0)
+    return jnp.sqrt(sum(jnp.sum(jnp.abs(leaf) ** 2) for leaf in leaves))
+
+
+def ons_reconstruction_penalty(
+    residual: jax.Array,
+    loss_kind: str = 'l2',
+    huber_delta: float = 0.01,
+) -> jax.Array:
+    """Elementwise ONS penalty, preserving L2 scale near zero."""
+    if loss_kind == 'l2':
+        return residual ** 2
+    if loss_kind == 'huber':
+        absolute = jnp.abs(residual)
+        return jnp.where(
+            absolute <= huber_delta,
+            residual ** 2,
+            2 * huber_delta * absolute - huber_delta ** 2,
+        )
+    raise ValueError(f"Unknown ons_loss '{loss_kind}' (use 'l2' or 'huber')")
 
 
 def create_optimizers(
@@ -131,6 +158,29 @@ def prepare_batch(
     return ons1, ons2, warped_linsRGB1, batch_true_dxy
 
 
+def masked_latent_consistency_loss(
+    pred_ip: jax.Array,
+    target_ip: jax.Array,
+    mask: jax.Array,
+) -> jax.Array:
+    """Channel-count-independent latent equivariance loss."""
+    error = (pred_ip - target_ip) ** 2 * mask
+    valid_per_pixel = jnp.sum(mask, axis=0) + 1
+    return jnp.sum(jnp.sum(error, axis=0) / valid_per_pixel) / pred_ip.shape[1]
+
+
+def zero_cell_position_updates(updates: CortexModel) -> CortexModel:
+    """Clear position-subtree updates while preserving optimizer tree shape."""
+    zero_position_updates = jax.tree.map(
+        jnp.zeros_like, updates.P_cell_position
+    )
+    return eqx.tree_at(
+        lambda tree: tree.P_cell_position,
+        updates,
+        replace=zero_position_updates,
+    )
+
+
 @eqx.filter_jit
 def train_step(
     cortex: CortexModel,
@@ -144,6 +194,12 @@ def train_step(
     kernel_size: int,
     simulating_tetra: bool,
     ns_ip_loss_kind: str = 'l2',
+    latent_consistency_weight: float = 0.0,
+    latent_consistency_batch_size: int = 0,
+    update_cell_position: bool = True,
+    update_neural_scope: bool = True,
+    ons_loss_kind: str = 'l2',
+    ons_huber_delta: float = 0.01,
 ) -> Tuple[CortexModel, OptimizerStates, Dict[str, float]]:
     """Three separate backward passes to match the reference PyTorch implementation.
 
@@ -167,32 +223,98 @@ def train_step(
 
     # --- Main Loss Backward Pass ---
     def main_loss_fn(model):
-        # Inline the main-loss path so we can reuse the decoded percept for the
-        # ns_ip branch below. Recomputing decode(ons1) there costs ~30ms/step on
-        # MPS and also differs from the Torch reference, which reuses the
-        # single forward graph for all three losses.
-        warped_ip1 = model.decode(ons1)
+        cell_position = model.P_cell_position
+        if not update_cell_position:
+            cell_position = jax.tree.map(
+                lambda leaf: (
+                    jax.lax.stop_gradient(leaf)
+                    if eqx.is_inexact_array(leaf)
+                    else leaf
+                ),
+                cell_position,
+            )
 
-        pred_dxy = model.M_global_movement(
-            ons1, ons2, model.P_cell_position, true_dxy
-        )
-        pred_warped_ip2, mask2 = model.P_cell_position.efficient_warping(
-            warped_ip1,
-            pred_dxy[:, 0, :],
-        )
+        if model.temporal_fusion == 'oracle':
+            pred_dxy = true_dxy
+            pred_warped_ip2, mask2 = model.decode_fused(
+                ons1, ons2, true_dxy[:, 0, :]
+            )
+            # The standalone frame-1 decode only feeds the auxiliary RGB
+            # probe. Avoid paying for it on steps where that probe is frozen.
+            warped_ip1 = (
+                model.decode(ons1)
+                if update_neural_scope
+                else pred_warped_ip2
+            )
+        else:
+            # Reuse this decode for both the temporal objective and RGB probe.
+            warped_ip1 = model.decode(ons1)
+            pred_dxy = model.M_global_movement(
+                ons1, ons2, cell_position, true_dxy
+            )
+            pred_warped_ip2, mask2 = cell_position.efficient_warping(
+                warped_ip1,
+                pred_dxy[:, 0, :],
+            )
         ons2_pred = model.encode(pred_warped_ip2)
 
         ons2_crop = ons2[:, :, P:-P, P:-P]
         ons2_pred_crop = ons2_pred[:, :, P:-P, P:-P]
         mask2_crop = mask2[:, :, P:-P, P:-P]
 
+        residual = ons2_pred_crop - ons2_crop
+        reconstruction_penalty = ons_reconstruction_penalty(
+            residual,
+            loss_kind=ons_loss_kind,
+            huber_delta=ons_huber_delta,
+        )
         main_loss = jnp.sum(
             jnp.sum(
-                ((ons2_pred_crop - ons2_crop) ** 2) * mask2_crop,
+                reconstruction_penalty * mask2_crop,
                 axis=0,
             ) / (jnp.sum(mask2_crop, axis=0) + 1)
         )
-        return main_loss, jax.lax.stop_gradient(warped_ip1)
+        squared_error = (ons2_pred_crop - ons2_crop) ** 2 * mask2_crop
+        normalized_ons_mse = jnp.sum(squared_error) / jnp.maximum(
+            jnp.sum(mask2_crop), 1.0
+        )
+        movement_mae_pixels = jnp.mean(
+            jnp.abs(pred_dxy - true_dxy)
+        ) * (model.M_global_movement.required_image_resolution / 2)
+        valid_mask_fraction = jnp.mean(mask2_crop)
+
+        # The ONS reconstruction above only observes the local projection of
+        # the latent percept selected by the cone mosaic. Enforce equivariance
+        # across eye movements in every latent channel so the decoder cannot
+        # hide unstable structure in directions that the encoder does not see.
+        if latent_consistency_weight:
+            consistency_batch_size = (
+                ons2.shape[0]
+                if latent_consistency_batch_size <= 0
+                else min(latent_consistency_batch_size, ons2.shape[0])
+            )
+            ip2 = model.decode(ons2[:consistency_batch_size])
+            ip2_crop = ip2[:, :, P:-P, P:-P]
+            pred_ip2_crop = pred_warped_ip2[
+                :consistency_batch_size, :, P:-P, P:-P
+            ]
+            consistency_mask = mask2_crop[:consistency_batch_size]
+            latent_consistency_loss = masked_latent_consistency_loss(
+                pred_ip2_crop, ip2_crop, consistency_mask
+            )
+        else:
+            latent_consistency_loss = jnp.array(0.0)
+
+        objective = main_loss + latent_consistency_weight * latent_consistency_loss
+        aux = (
+            jax.lax.stop_gradient(warped_ip1),
+            jax.lax.stop_gradient(main_loss),
+            jax.lax.stop_gradient(latent_consistency_loss),
+            jax.lax.stop_gradient(normalized_ons_mse),
+            jax.lax.stop_gradient(movement_mae_pixels),
+            jax.lax.stop_gradient(valid_mask_fraction),
+        )
+        return objective, aux
 
     main_filter = jax.tree.map(lambda _: False, cortex)
     main_filter = eqx.tree_at(
@@ -200,33 +322,53 @@ def train_step(
         main_filter, replace=(True, True, True, True)
     )
 
-    (l_main, warped_ip1_detached), main_grads = eqx.filter_value_and_grad(
+    (l_main_objective, main_aux), main_grads = eqx.filter_value_and_grad(
         main_loss_fn,
         has_aux=True,
     )(cortex)
+    (
+        warped_ip1_detached,
+        l_main,
+        l_latent_consistency,
+        l_normalized_ons_mse,
+        movement_mae_pixels,
+        valid_mask_fraction,
+    ) = main_aux
     main_grads = eqx.filter(main_grads, main_filter)
+    grad_norm_cone = tree_l2_norm(main_grads.C_cone_spectral_type)
+    grad_norm_demosaicing = tree_l2_norm(main_grads.D_demosaicing)
+    grad_norm_lateral_inhibition = tree_l2_norm(
+        main_grads.W_lateral_inhibition_weights
+    )
+    grad_norm_position = tree_l2_norm(main_grads.P_cell_position)
     main_updates, new_main_state = main_opt.update(main_grads, opt_states.main, eqx.filter(cortex, main_filter))
+    if not update_cell_position:
+        main_updates = zero_cell_position_updates(main_updates)
     cortex = eqx.apply_updates(cortex, main_updates)
 
     # --- NS Cone Mosaic Loss Backward Pass ---
     # Mirrors the ns_cm branch of main_train exactly (cone identity is detached
     # there too), without the rest of the forward pass.
-    def ns_cm_loss_fn(model):
-        C = jax.lax.stop_gradient(model.C_cone_spectral_type.get_cone_identity_function())
-        pred_cone_mosaic = model.ns_cm(C)
-        return jnp.sum((pred_cone_mosaic - cone_mosaic)[:, :, P:-P, P:-P] ** 2)
+    if update_neural_scope:
+        def ns_cm_loss_fn(model):
+            C = jax.lax.stop_gradient(model.C_cone_spectral_type.get_cone_identity_function())
+            pred_cone_mosaic = model.ns_cm(C)
+            return jnp.sum((pred_cone_mosaic - cone_mosaic)[:, :, P:-P, P:-P] ** 2)
 
-    cm_filter = jax.tree.map(lambda _: False, cortex)
-    cm_filter = eqx.tree_at(lambda m: m.ns_cm, cm_filter, replace=True)
+        cm_filter = jax.tree.map(lambda _: False, cortex)
+        cm_filter = eqx.tree_at(lambda m: m.ns_cm, cm_filter, replace=True)
 
-    l_cm, cm_grads = eqx.filter_value_and_grad(ns_cm_loss_fn)(cortex)
-    cm_grads = eqx.filter(cm_grads, cm_filter)
-    cm_updates, new_cm_state = ns_cm_opt.update(cm_grads, opt_states.ns_cm, eqx.filter(cortex, cm_filter))
-    cortex = eqx.apply_updates(cortex, cm_updates)
+        l_cm, cm_grads = eqx.filter_value_and_grad(ns_cm_loss_fn)(cortex)
+        cm_grads = eqx.filter(cm_grads, cm_filter)
+        cm_updates, new_cm_state = ns_cm_opt.update(cm_grads, opt_states.ns_cm, eqx.filter(cortex, cm_filter))
+        cortex = eqx.apply_updates(cortex, cm_updates)
+    else:
+        l_cm = jnp.array(0.0)
+        new_cm_state = opt_states.ns_cm
 
     # --- NS Internal Percept Loss Backward Pass ---
     # In the original, ns_ip_loss is only backpropagated when not simulating_tetra
-    if not simulating_tetra:
+    if not simulating_tetra and update_neural_scope:
         # Mirrors the ns_ip branch of main_train: reuse the detached decode from
         # the main forward and only train the ns_ip projection.
         def ns_ip_loss_fn(model):
@@ -255,9 +397,18 @@ def train_step(
 
     losses = {
         'main': l_main,
+        'main_objective': l_main_objective,
+        'normalized_ons_mse': l_normalized_ons_mse,
+        'movement_mae_pixels': movement_mae_pixels,
+        'valid_mask_fraction': valid_mask_fraction,
+        'grad_norm_cone': grad_norm_cone,
+        'grad_norm_demosaicing': grad_norm_demosaicing,
+        'grad_norm_lateral_inhibition': grad_norm_lateral_inhibition,
+        'grad_norm_position': grad_norm_position,
+        'latent_consistency': l_latent_consistency,
         'ns_cm': l_cm,
         'ns_ip': l_ip,
-        'total': l_main + l_cm + l_ip
+        'total': l_main_objective + l_cm + l_ip
     }
 
     return cortex, new_opt_states, losses
@@ -320,6 +471,8 @@ def train_cortical_model(
     cone_distribution = params.get('RetinaModel', {}).get('retina_spatial_sampling', {}).get('cone_distribution', 'Human')
     latent_dim = params.get('CortexModel', {}).get('latent_dim') or \
                  params.get('CorticalModel', {}).get('latent_dim', 8)
+    cortical_cfg = params.get('CorticalModel', params.get('CortexModel', {}))
+    demosaicing_cfg = cortical_cfg.get('cortex_learn_demosaicing', {})
 
     # Retina
     retina = RetinaModel(
@@ -332,6 +485,9 @@ def train_cortical_model(
         cone_fundamentals_params=params['RetinaModel']['retina_spectral_sampling'].get(
             'cone_fundamentals'
         ),
+        cone_gain_adaptation=params['RetinaModel']['retina_spectral_sampling'].get(
+            'gain_adaptation', 'none'
+        ),
         root_dir=root_dir
     )
     print(f"✓ Retina initialized (image resolution: {retina.required_image_resolution})")
@@ -343,9 +499,28 @@ def train_cortical_model(
         simulation_size=simulation_size,
         required_image_resolution=retina.required_image_resolution,
         simulating_tetra=simulating_tetra,
+        demosaicing_type=demosaicing_cfg.get('type', 'Default'),
+        demosaicing_base_channels=demosaicing_cfg.get('base_channels', 16),
+        demosaicing_compute_dtype=demosaicing_cfg.get('compute_dtype', 'float32'),
+        demosaicing_context_channels=demosaicing_cfg.get('context_channels', 16),
+        demosaicing_context_kernel_size=demosaicing_cfg.get('context_kernel_size', 5),
+        demosaicing_hidden_channels=demosaicing_cfg.get('hidden_channels', 32),
+        demosaicing_hidden_kernel_size=demosaicing_cfg.get('hidden_kernel_size', 1),
+        demosaicing_num_frequencies=demosaicing_cfg.get('num_frequencies', 6),
+        demosaicing_omega0=demosaicing_cfg.get('omega0', 10.0),
+        demosaicing_activation=demosaicing_cfg.get('activation', 'sine'),
+        demosaicing_conditioning=demosaicing_cfg.get('conditioning', 'none'),
+        demosaicing_gaussian_kernel_size=demosaicing_cfg.get('gaussian_kernel_size', 9),
+        demosaicing_gaussian_sigma=demosaicing_cfg.get('gaussian_sigma', 2.0),
+        demosaicing_gaussian_epsilon=demosaicing_cfg.get('gaussian_epsilon', 1e-3),
+        temporal_fusion=cortical_cfg.get('temporal_fusion', 'none'),
         key=subkey
     )
-    print(f"✓ Cortex initialized")
+    print(
+        "✓ Cortex initialized "
+        f"(demosaicing={type(cortex.D_demosaicing).__name__}, "
+        f"compute_dtype={cortex.D_demosaicing.compute_dtype})"
+    )
 
     # Dataset
     print("\nLoading dataset...")
@@ -384,6 +559,20 @@ def train_cortical_model(
     # Optimizers. Schedule settings come from the Training config; defaults keep
     # torch parity (constant lr) unless 'lr_schedule: warmup_cosine' is set.
     training_cfg = params.get('Training', {})
+    cell_position_update_cycle = training_cfg.get('cell_position_update_cycle', 1)
+    if cell_position_update_cycle < 1:
+        raise ValueError('cell_position_update_cycle must be at least 1')
+    neural_scope_update_cycle = training_cfg.get('neural_scope_update_cycle', 1)
+    if neural_scope_update_cycle < 1:
+        raise ValueError('neural_scope_update_cycle must be at least 1')
+    checkpoint_cycle = training_cfg.get('checkpoint_cycle')
+    if checkpoint_cycle is not None and checkpoint_cycle < 1:
+        raise ValueError('checkpoint_cycle must be at least 1')
+    latent_consistency_batch_size = training_cfg.get(
+        'latent_consistency_batch_size', 0
+    )
+    if latent_consistency_batch_size < 0:
+        raise ValueError('latent_consistency_batch_size cannot be negative')
     main_opt, ns_cm_opt, ns_ip_opt = create_optimizers(
         learning_rate,
         lr_schedule=training_cfg.get('lr_schedule', 'constant'),
@@ -491,6 +680,18 @@ def train_cortical_model(
                 batch_true_dxy, true_cone_mosaic, true_LI_kernel_size,
                 simulating_tetra,
                 ns_ip_loss_kind=training_cfg.get('ns_ip_loss', 'l2'),
+                latent_consistency_weight=training_cfg.get('latent_consistency_weight', 0.0),
+                latent_consistency_batch_size=latent_consistency_batch_size,
+                update_cell_position=(
+                    (num_gradient_updates + 1) % cell_position_update_cycle == 0
+                ),
+                update_neural_scope=(
+                    (num_gradient_updates + 1) % neural_scope_update_cycle == 0
+                    or (num_gradient_updates + 1) % 25 == 0
+                    or (num_gradient_updates + 1) in logging_timesteps
+                ),
+                ons_loss_kind=training_cfg.get('ons_loss', 'l2'),
+                ons_huber_delta=training_cfg.get('ons_huber_delta', 0.01),
             )
 
             num_gradient_updates += 1
@@ -499,13 +700,35 @@ def train_cortical_model(
             # serializes JAX's async dispatch. Do it sparsely (and on logging
             # steps) so the device can run ahead between updates.
             if num_gradient_updates % 25 == 0 or num_gradient_updates in logging_timesteps:
-                bar.set_postfix({
+                scalar_metrics = {
                     'main': f'{float(losses["main"]):.4f}',
+                    'latent': f'{float(losses["latent_consistency"]):.4f}',
                     'ns_cm': f'{float(losses["ns_cm"]):.4f}',
-                    'ns_ip': f'{float(losses["ns_ip"]):.4f}'
-                })
+                    'ns_ip': f'{float(losses["ns_ip"]):.4f}',
+                    'move_px': f'{float(losses["movement_mae_pixels"]):.3f}',
+                    'g_D': f'{float(losses["grad_norm_demosaicing"]):.2e}',
+                }
+                bar.set_postfix(scalar_metrics)
+                if logger is not None:
+                    metric_record = {
+                        'step': num_gradient_updates,
+                        **{key: float(value) for key, value in losses.items()},
+                    }
+                    with open(
+                        os.path.join(logger.log_dir, 'training_metrics.jsonl'),
+                        'a',
+                        encoding='utf-8',
+                    ) as metrics_file:
+                        metrics_file.write(json.dumps(metric_record) + '\n')
 
-            if num_gradient_updates in logging_timesteps:
+            should_checkpoint = (
+                num_gradient_updates in logging_timesteps
+                or (
+                    checkpoint_cycle is not None
+                    and num_gradient_updates % checkpoint_cycle == 0
+                )
+            )
+            if should_checkpoint:
                 checkpoint_manager.save(
                     num_gradient_updates, 
                     args=ocp.args.StandardSave({'model': cortex, 'opt_states': opt_states})
@@ -514,8 +737,9 @@ def train_cortical_model(
                 # Also save separate .eqx file for Penzai/visualization
                 eqx.tree_serialise_leaves(f"{checkpoint_dir}/model_{num_gradient_updates}.eqx", cortex)
 
-                # --- Log progress if enabled ---
-                if logger is not None:
+                # Image logging remains on the sparse logging schedule; it is
+                # intentionally decoupled from lightweight recovery checkpoints.
+                if logger is not None and num_gradient_updates in logging_timesteps:
                     logger.log_progress(
                         simulating_tetra=simulating_tetra,
                         retina=retina,

@@ -46,3 +46,5 @@ Dataset/ARAD_1K_Mirror/
 Dataset/ARAD_*_LMS/
 # *.mat
 *.zip
+
+ModelingEmergenceOfColorVision.pdf

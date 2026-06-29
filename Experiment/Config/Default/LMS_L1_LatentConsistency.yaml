@@ -1,0 +1,62 @@
+# LMS_L1 with an observer-neutral eye-movement equivariance objective.
+Experiment:
+  name: 'LMS_L1_LatentConsistency'
+  simulation_size: 256
+  timesteps_per_image: 2
+  simulating_tetra: false
+
+RetinaModel:
+  retina_spatial_sampling:
+    type: 'Default'
+  retina_spectral_sampling:
+    type: 'Default'
+    cone_types: 'LMS'
+  retina_lateral_inhibition:
+    type: 'Default'
+  retina_eye_motion:
+    type: 'Default'
+  retina_spike_conversion:
+    type: 'Default'
+  max_shift_size: 15
+
+Dataset:
+  dataset_name: 'NTIRE'
+  batch_size: 8
+
+DimensionalityBoosting:
+  is_dimensionality_boosting: false
+  previous_cone_mosaic: null
+  load_pretrain_timestep: null
+
+Training:
+  learning_rate: 0.001
+  learning_progress_logging: true
+  logging_mode: 'Local'
+  logging_cycle: 1000
+  max_gradient_updates: 100000
+  lr_schedule: 'warmup_cosine'
+  warmup_steps: 1000
+  end_learning_rate: 0.00001
+  ns_ip_loss: 'l1'
+
+  # Require decode(ONS[t+1]) to match the eye-movement-warped decode(ONS[t])
+  # in every latent channel. This acts on the cortical representation and does
+  # not assume RGB, a cone count, or any particular spectral sensitivities.
+  latent_consistency_weight: 0.1
+
+CorticalModel:
+  cortex_learn_eye_motion:
+    type: 'Default'
+  cortex_learn_spatial_sampling:
+    type: 'Default'
+  cortex_learn_cone_spectral_type:
+    type: 'Default'
+  cortex_learn_demosaicing:
+    type: 'Default'
+    base_channels: 16
+    # bfloat16 convolution compute with float32 parameters and optimizer state.
+    # This tests reduced activation precision without sacrificing dynamic range.
+    compute_dtype: 'bfloat16'
+  cortex_learn_lateral_inhibition:
+    type: 'Default'
+  latent_dim: 8

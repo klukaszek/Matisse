@@ -216,16 +216,36 @@ class LocalProgressLogger:
             # (1, H, W, 4) -> (1, 4, H, W) -> (1, 1, 4, H, W)
             test_LMS = jnp.transpose(test_LMS, (0, 3, 1, 2))[:, None, ...]
 
-            # Retina forward (single timestep, no eye motion)
             key = jax.random.PRNGKey(0)
-            test_warped = retina.SpatialSampling(test_LMS)
-            test_pa = retina.SpectralSampling(test_warped, key=key)
-            test_pa = test_pa[:, 0, ...]  # Squeeze timestep: (1, 1, H, W)
-            test_ons = retina.LateralInhibition(test_pa, key=key)
-            test_ons = retina.SpikeConversion(test_ons)
-
-            # Cortex decode
-            warped_ip = cortex.decode(test_ons)
+            if cortex.temporal_fusion == 'oracle':
+                margin = retina.EyeMotion.max_shift_size
+                full_field = jnp.pad(
+                    test_LMS[:, 0],
+                    ((0, 0), (0, 0), (margin, margin), (margin, margin)),
+                    mode='reflect',
+                )
+                test_ons_pair, true_dxy, test_warped = retina(
+                    full_field, key=key
+                )
+                warped_ip, _ = cortex.decode_fused(
+                    test_ons_pair[:, 0],
+                    test_ons_pair[:, 1],
+                    true_dxy[:, 0],
+                )
+                # Fusion is aligned to the second view; return to the centered
+                # first view used by the side-by-side reference image.
+                warped_ip, _ = cortex.P_cell_position.efficient_warping(
+                    warped_ip, -true_dxy[:, 0]
+                )
+                test_pa = test_ons = test_ons_pair
+            else:
+                # Retina forward (single timestep, no eye motion)
+                test_warped = retina.SpatialSampling(test_LMS)
+                test_pa = retina.SpectralSampling(test_warped, key=key)
+                test_pa = test_pa[:, 0, ...]
+                test_ons = retina.LateralInhibition(test_pa, key=key)
+                test_ons = retina.SpikeConversion(test_ons)
+                warped_ip = cortex.decode(test_ons)
 
             # Neural scope -> sRGB (still in warped cone-space here)
             warped_linsRGB = cortex.ns_ip(warped_ip)

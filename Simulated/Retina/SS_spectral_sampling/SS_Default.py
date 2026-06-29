@@ -17,6 +17,7 @@ class DefaultSpectralSampling(eqx.Module):
     """
     cone_mosaic: Float[Array, "1 1 4 height width"]
     cone_fundamentals: Float[Array, "301 4"]
+    cone_response_gain: Float[Array, "4"]
     cone_cell_noise_std: float = eqx.field(static=True)
     cone_types: tuple = eqx.field(static=True)
 
@@ -42,6 +43,7 @@ class DefaultSpectralSampling(eqx.Module):
         # Convert to (1, 1, 4, H, W) format
         cone_mosaic = jnp.array(cone_mosaic_np).transpose(2, 0, 1)[None, None, ...]
         self.cone_mosaic = cone_mosaic
+        self.cone_response_gain = jnp.ones((4,), dtype=cone_mosaic.dtype)
 
         # Cone cell activation noise
         self.cone_cell_noise_std = 0.01
@@ -82,7 +84,10 @@ class DefaultSpectralSampling(eqx.Module):
         """
         # Element-wise multiplication: (B, T, 4, H, W) * (1, 1, 4, H, W) -> (B, T, 4, H, W)
         # Then sum over spectral dimension (axis=2)
-        photoreceptor_activation = jnp.sum(lms * self.cone_mosaic, axis=2, keepdims=True)
+        adapted_lms = lms * self.cone_response_gain[None, None, :, None, None]
+        photoreceptor_activation = jnp.sum(
+            adapted_lms * self.cone_mosaic, axis=2, keepdims=True
+        )
 
         # The reference samples one discrete noise level for the whole tensor.
         key1, key2 = jax.random.split(key)

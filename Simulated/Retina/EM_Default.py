@@ -51,66 +51,54 @@ class DefaultEyeMotion(eqx.Module):
         MSS = self.max_shift_size
         T = self.timesteps_per_image
 
-        # Initialize outputs
-        batch_LMS_current_FoV = jnp.zeros(
-            (batch_size, T, channels, required_image_resolution, required_image_resolution)
-        )
-        batch_true_dxy = jnp.zeros((batch_size, T - 1, 2))
-
         # Initial crop (centered)
         initial_crop = jax.lax.dynamic_slice(
             LMS_full_field,
             (0, 0, MSS, MSS),
             (batch_size, channels, required_image_resolution, required_image_resolution)
         )
-        batch_LMS_current_FoV = batch_LMS_current_FoV.at[:, 0].set(initial_crop)
 
-        # Simulate eye movements for each batch item
-        def process_single_image(i, carry):
-            fov_array, dxy_array, key = carry
-            lms_image = LMS_full_field[i]
-            key, subkey = jax.random.split(key)
-
-            # Simulate trajectory for this image
-            x, y = MSS, MSS
-            fovs = [fov_array[i, 0]]  # Start with initial crop
-            dxys = []
-
-            for t in range(T - 1):
-                key, subkey = jax.random.split(key)
-                # Random shift
-                dx, dy = jax.random.randint(subkey, (2,), -MSS, MSS)
-
-                # New position with clamping
-                new_x = jnp.clip(x + dx, 0, W - required_image_resolution)
-                new_y = jnp.clip(y + dy, 0, H - required_image_resolution)
-
-                # Actual displacement after clamping
-                dx = new_x - x
-                dy = new_y - y
-
-                # Extract crop at new position
-                crop = jax.lax.dynamic_slice(
-                    lms_image,
-                    (0, new_y, new_x),
-                    (channels, required_image_resolution, required_image_resolution)
-                )
-
-                fovs.append(crop)
-                dxys.append(jnp.array([dx, dy], dtype=jnp.float32))
-
-                x, y = new_x, new_y
-
-            # Update arrays
-            fov_array = fov_array.at[i, 1:].set(jnp.stack(fovs[1:]))
-            dxy_array = dxy_array.at[i].set(jnp.stack(dxys))
-
-            return (fov_array, dxy_array, key)
-
-        # Process all images in batch
-        init_carry = (batch_LMS_current_FoV, batch_true_dxy, key)
-        final_fov, final_dxy, _ = jax.lax.fori_loop(
-            0, batch_size, process_single_image, init_carry
+        # Generate and apply all batch trajectories together. The previous
+        # implementation looped over batch items and repeatedly scattered into
+        # a full (B,T,C,H,W) output, serializing otherwise independent crops.
+        proposed_shifts = jax.random.randint(
+            key,
+            (T - 1, batch_size, 2),
+            -MSS,
+            MSS,
         )
 
-        return final_fov, final_dxy
+        def trajectory_step(position, shift):
+            x, y = position
+            proposed_x = x + shift[:, 0]
+            proposed_y = y + shift[:, 1]
+            new_x = jnp.clip(proposed_x, 0, W - required_image_resolution)
+            new_y = jnp.clip(proposed_y, 0, H - required_image_resolution)
+
+            def crop_one(image, crop_x, crop_y):
+                return jax.lax.dynamic_slice(
+                    image,
+                    (0, crop_y, crop_x),
+                    (channels, required_image_resolution, required_image_resolution),
+                )
+
+            crops = jax.vmap(crop_one)(LMS_full_field, new_x, new_y)
+            actual_shift = jnp.stack((new_x - x, new_y - y), axis=-1)
+            return (new_x, new_y), (crops, actual_shift.astype(jnp.float32))
+
+        initial_position = (
+            jnp.full((batch_size,), MSS, dtype=jnp.int32),
+            jnp.full((batch_size,), MSS, dtype=jnp.int32),
+        )
+        _, (moved_crops, true_dxy) = jax.lax.scan(
+            trajectory_step,
+            initial_position,
+            proposed_shifts,
+        )
+
+        moved_crops = jnp.swapaxes(moved_crops, 0, 1)
+        batch_LMS_current_FoV = jnp.concatenate(
+            (initial_crop[:, None], moved_crops),
+            axis=1,
+        )
+        return batch_LMS_current_FoV, jnp.swapaxes(true_dxy, 0, 1)

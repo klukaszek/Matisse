@@ -6,7 +6,7 @@ from jaxtyping import Array, Float
 from typing import Tuple
 
 from .C_cone_spectral_type import DefaultConeSpectralType
-from .D_demosaicing import DefaultDemosaicing
+from .D_demosaicing import DefaultDemosaicing, ImplicitDemosaicing
 from .W_lateral_inhibition_weights import DefaultLateralInhibitionWeights
 from .P_cell_position import DefaultCellPosition
 from .M_global_movement import DefaultGlobalMovement
@@ -21,13 +21,14 @@ class CortexModel(eqx.Module):
     internal percepts from optic nerve signals.
     """
     C_cone_spectral_type: DefaultConeSpectralType
-    D_demosaicing: DefaultDemosaicing
+    D_demosaicing: DefaultDemosaicing | ImplicitDemosaicing
     W_lateral_inhibition_weights: DefaultLateralInhibitionWeights
     P_cell_position: DefaultCellPosition
     M_global_movement: DefaultGlobalMovement
     ns_ip: NS_internal_percept
     ns_cm: NS_cone_mosaic
     learn_ip_ns: bool = eqx.field(static=True)
+    temporal_fusion: str = eqx.field(static=True)
 
     def __init__(
         self,
@@ -35,6 +36,21 @@ class CortexModel(eqx.Module):
         simulation_size: int = 256,
         required_image_resolution: int = None,
         simulating_tetra: bool = False,
+        demosaicing_type: str = "Default",
+        demosaicing_base_channels: int = 16,
+        demosaicing_compute_dtype: str = "float32",
+        demosaicing_context_channels: int = 16,
+        demosaicing_context_kernel_size: int = 5,
+        demosaicing_hidden_channels: int = 32,
+        demosaicing_hidden_kernel_size: int = 1,
+        demosaicing_num_frequencies: int = 6,
+        demosaicing_omega0: float = 10.0,
+        demosaicing_activation: str = "sine",
+        demosaicing_conditioning: str = "none",
+        demosaicing_gaussian_kernel_size: int = 9,
+        demosaicing_gaussian_sigma: float = 2.0,
+        demosaicing_gaussian_epsilon: float = 1e-3,
+        temporal_fusion: str = "none",
         *,
         key: jax.random.PRNGKey
     ):
@@ -46,9 +62,15 @@ class CortexModel(eqx.Module):
             required_image_resolution: Retina field-of-view resolution used by
                 the global movement pyramid
             simulating_tetra: Whether simulating tetrachromacy
+            demosaicing_type: Demosaicing implementation name
+            demosaicing_base_channels: Width of the first U-Net stage
+            demosaicing_compute_dtype: Compute dtype for U-Net convolutions
             key: JAX random key for initialization
         """
         keys = jax.random.split(key, 7)
+        if temporal_fusion not in {"none", "oracle"}:
+            raise ValueError("temporal_fusion must be 'none' or 'oracle'")
+        self.temporal_fusion = temporal_fusion
 
         # Initialize all submodules
         self.C_cone_spectral_type = DefaultConeSpectralType(
@@ -57,10 +79,35 @@ class CortexModel(eqx.Module):
             key=keys[0]
         )
 
-        self.D_demosaicing = DefaultDemosaicing(
-            latent_dim=latent_dim,
-            key=keys[1]
-        )
+        if demosaicing_type.lower() == "default":
+            self.D_demosaicing = DefaultDemosaicing(
+                latent_dim=latent_dim,
+                base_channels=demosaicing_base_channels,
+                compute_dtype=demosaicing_compute_dtype,
+                key=keys[1],
+            )
+        elif demosaicing_type.lower() in {"implicit", "siren"}:
+            self.D_demosaicing = ImplicitDemosaicing(
+                latent_dim=latent_dim,
+                context_channels=demosaicing_context_channels,
+                context_kernel_size=demosaicing_context_kernel_size,
+                hidden_channels=demosaicing_hidden_channels,
+                hidden_kernel_size=demosaicing_hidden_kernel_size,
+                num_frequencies=demosaicing_num_frequencies,
+                omega0=demosaicing_omega0,
+                activation=demosaicing_activation,
+                conditioning=demosaicing_conditioning,
+                gaussian_kernel_size=demosaicing_gaussian_kernel_size,
+                gaussian_sigma=demosaicing_gaussian_sigma,
+                gaussian_epsilon=demosaicing_gaussian_epsilon,
+                compute_dtype=demosaicing_compute_dtype,
+                key=keys[1],
+            )
+        else:
+            raise ValueError(
+                f"Unknown demosaicing type '{demosaicing_type}' "
+                "(use 'Default' or 'Implicit')"
+            )
 
         self.W_lateral_inhibition_weights = DefaultLateralInhibitionWeights(
             simulation_size=simulation_size,
@@ -111,12 +158,46 @@ class CortexModel(eqx.Module):
         pa = self.W_lateral_inhibition_weights.deconvolve(ons)
 
         # Inject cone identity
-        C_injected_pa = self.C_cone_spectral_type.C_injection(pa)
+        cone_identity = self.C_cone_spectral_type.get_cone_identity_function()
+        C_injected_pa = pa * cone_identity
 
         # Demosaic to reconstruct internal percept
-        ip = self.D_demosaicing.demosaic(C_injected_pa)
+        ip = self.D_demosaicing.demosaic(C_injected_pa, cone_identity)
 
         return ip
+
+    def decode_fused(
+        self,
+        ons1: Float[Array, "batch 1 height width"],
+        ons2: Float[Array, "batch 1 height width"],
+        dxy_1_to_2: Float[Array, "batch 2"],
+    ) -> tuple[
+        Float[Array, "batch latent_dim height width"],
+        Float[Array, "batch 1 height width"],
+    ]:
+        """Register and fuse two cone-sample fields before demosaicing."""
+        cone_identity = self.C_cone_spectral_type.get_cone_identity_function()
+        pa1 = self.W_lateral_inhibition_weights.deconvolve(ons1)
+        pa2 = self.W_lateral_inhibition_weights.deconvolve(ons2)
+        injected1 = pa1 * cone_identity
+        injected2 = pa2 * cone_identity
+
+        warped_injected1, valid_mask = self.P_cell_position.efficient_warping(
+            injected1, dxy_1_to_2
+        )
+        support = jnp.broadcast_to(cone_identity ** 2, injected1.shape)
+        warped_support1, _ = self.P_cell_position.efficient_warping(
+            support, dxy_1_to_2
+        )
+
+        combined_activation = injected2 + warped_injected1 * valid_mask
+        combined_support = support + warped_support1 * valid_mask
+        percept2 = self.D_demosaicing.demosaic(
+            combined_activation,
+            cone_identity,
+            cone_support=combined_support,
+        )
+        return percept2, valid_mask
 
     def encode(
         self,

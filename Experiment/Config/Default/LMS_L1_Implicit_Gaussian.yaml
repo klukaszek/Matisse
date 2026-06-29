@@ -1,0 +1,74 @@
+# Condition the implicit demosaicer with deterministic Gaussian normalized
+# interpolation. This gives every latent channel a dense estimate and explicit
+# cone-support confidence before the learned residual field is applied.
+Experiment:
+  name: 'LMS_L1_Implicit_Gaussian'
+  simulation_size: 256
+  timesteps_per_image: 2
+  simulating_tetra: false
+
+RetinaModel:
+  retina_spatial_sampling:
+    type: 'Default'
+  retina_spectral_sampling:
+    type: 'Default'
+    cone_types: 'LMS'
+  retina_lateral_inhibition:
+    type: 'Default'
+  retina_eye_motion:
+    type: 'Default'
+  retina_spike_conversion:
+    type: 'Default'
+  max_shift_size: 15
+
+Dataset:
+  dataset_name: 'NTIRE'
+  batch_size: 8
+  device_resident: false
+
+DimensionalityBoosting:
+  is_dimensionality_boosting: false
+  previous_cone_mosaic: null
+  load_pretrain_timestep: null
+
+Training:
+  learning_rate: 0.001
+  learning_progress_logging: true
+  logging_mode: 'Local'
+  logging_cycle: 1000
+  max_gradient_updates: 100000
+  checkpoint_cycle: 1000
+  lr_schedule: 'warmup_cosine'
+  warmup_steps: 1000
+  end_learning_rate: 0.00001
+  ns_ip_loss: 'l1'
+  cell_position_update_cycle: 4
+  ons_loss: 'huber'
+  ons_huber_delta: 0.01
+
+CorticalModel:
+  cortex_learn_eye_motion:
+    type: 'Default'
+  cortex_learn_spatial_sampling:
+    type: 'Default'
+  cortex_learn_cone_spectral_type:
+    type: 'Default'
+  cortex_learn_demosaicing:
+    type: 'Implicit'
+    conditioning: 'gaussian'
+    gaussian_kernel_size: 9
+    gaussian_sigma: 2.0
+    gaussian_epsilon: 0.001
+    context_channels: 16
+    context_kernel_size: 5
+    hidden_channels: 32
+    hidden_kernel_size: 1
+    # Retain only low-frequency position context; cone identity and Gaussian
+    # support now carry the high-frequency retinal structure.
+    num_frequencies: 2
+    omega0: 10.0
+    activation: 'relu'
+    compute_dtype: 'bfloat16'
+  cortex_learn_lateral_inhibition:
+    type: 'Default'
+  latent_dim: 8

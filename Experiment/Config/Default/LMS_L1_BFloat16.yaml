@@ -1,0 +1,64 @@
+# Precision-only comparison against LMS_L1. Architecture and width are
+# unchanged; only U-Net convolution compute uses bfloat16. Parameters,
+# gradients, and optimizer state remain float32.
+Experiment:
+  name: 'LMS_L1_BFloat16'
+  simulation_size: 256
+  timesteps_per_image: 2
+  simulating_tetra: false
+
+RetinaModel:
+  retina_spatial_sampling:
+    type: 'Default'
+  retina_spectral_sampling:
+    type: 'Default'
+    cone_types: 'LMS'
+  retina_lateral_inhibition:
+    type: 'Default'
+  retina_eye_motion:
+    type: 'Default'
+  retina_spike_conversion:
+    type: 'Default'
+  max_shift_size: 15
+
+Dataset:
+  dataset_name: 'NTIRE'
+  batch_size: 8
+
+DimensionalityBoosting:
+  is_dimensionality_boosting: false
+  previous_cone_mosaic: null
+  load_pretrain_timestep: null
+
+Training:
+  learning_rate: 0.001
+  learning_progress_logging: true
+  logging_mode: 'Local'
+  logging_cycle: 1000
+  max_gradient_updates: 100000
+  lr_schedule: 'warmup_cosine'
+  warmup_steps: 1000
+  end_learning_rate: 0.00001
+  ns_ip_loss: 'l1'
+
+  # The global cell-position map changes slowly. The earlier 40k run retained
+  # the same true-map accuracy at this cadence (RMSE 0.118 vs 0.119), while
+  # avoiding the expensive RealNVP backward pass on three of four steps.
+  # Movement estimation remains full-resolution and NeuralScope still fits
+  # every step; neither image geometry nor diagnostic fidelity is reduced.
+  cell_position_update_cycle: 4
+
+CorticalModel:
+  cortex_learn_eye_motion:
+    type: 'Default'
+  cortex_learn_spatial_sampling:
+    type: 'Default'
+  cortex_learn_cone_spectral_type:
+    type: 'Default'
+  cortex_learn_demosaicing:
+    type: 'Default'
+    base_channels: 16
+    compute_dtype: 'bfloat16'
+  cortex_learn_lateral_inhibition:
+    type: 'Default'
+  latent_dim: 8

@@ -37,6 +37,7 @@ class RetinaModel(eqx.Module):
         cone_distribution_type: str = 'Human',
         simulating_tetra: bool = False,
         cone_fundamentals_params: Optional[dict] = None,
+        cone_gain_adaptation: str = 'none',
         root_dir: Optional[str] = None
     ):
         """Initialize retina model.
@@ -84,6 +85,21 @@ class RetinaModel(eqx.Module):
         # Initialize color space transform
         cone_fundamentals = self.SpectralSampling.get_cone_fundamentals()
         self.CST = ColorSpaceTransform(cone_fundamentals, root_dir=root_dir)
+        if cone_gain_adaptation not in {'none', 'white'}:
+            raise ValueError("cone_gain_adaptation must be 'none' or 'white'")
+        if cone_gain_adaptation == 'white':
+            white_response = self.CST.white_point.reshape(-1)
+            active = jnp.max(cone_fundamentals, axis=0) > 0
+            response_gain = jnp.where(
+                active,
+                1.0 / jnp.maximum(white_response, 1e-6),
+                1.0,
+            )
+            self.SpectralSampling = eqx.tree_at(
+                lambda module: module.cone_response_gain,
+                self.SpectralSampling,
+                response_gain,
+            )
 
     def __call__(
         self,
