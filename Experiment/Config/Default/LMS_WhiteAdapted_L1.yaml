@@ -1,0 +1,61 @@
+# Encoder-only ablation: the original L2 U-Net baseline with static von
+# Kries-style gain adaptation. Each active cone class has unit response to the
+# display white point, equalizing S-signal scale without changing mosaic ratios.
+Experiment:
+  name: 'LMS_WhiteAdapted'
+  simulation_size: 256
+  timesteps_per_image: 2
+  simulating_tetra: false
+
+RetinaModel:
+  retina_spatial_sampling:
+    type: 'Default'
+  retina_spectral_sampling:
+    type: 'Default'
+    cone_types: 'LMS'
+    gain_adaptation: 'white'
+  retina_lateral_inhibition:
+    type: 'Default'
+  retina_eye_motion:
+    type: 'Default'
+  retina_spike_conversion:
+    type: 'Default'
+  max_shift_size: 15
+
+Dataset:
+  dataset_name: 'NTIRE'
+  batch_size: 8
+  device_resident: false
+
+DimensionalityBoosting:
+  is_dimensionality_boosting: false
+  previous_cone_mosaic: null
+  load_pretrain_timestep: null
+
+Training:
+  learning_rate: 0.001
+  learning_progress_logging: true
+  logging_mode: 'Local'
+  logging_cycle: 1000
+  max_gradient_updates: 100000
+  checkpoint_cycle: 1000
+  lr_schedule: 'warmup_cosine'
+  warmup_steps: 1000
+  end_learning_rate: 0.00001
+  ns_ip_loss: 'l1'
+  cell_position_update_cycle: 4
+
+CorticalModel:
+  cortex_learn_eye_motion:
+    type: 'Default'
+  cortex_learn_spatial_sampling:
+    type: 'Default'
+  cortex_learn_cone_spectral_type:
+    type: 'Default'
+  cortex_learn_demosaicing:
+    type: 'Default'
+    base_channels: 16
+    compute_dtype: 'bfloat16'
+  cortex_learn_lateral_inhibition:
+    type: 'Default'
+  latent_dim: 8

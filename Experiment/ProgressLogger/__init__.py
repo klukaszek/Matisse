@@ -43,6 +43,77 @@ else:
     _prop = None
 
 
+def _srgb_to_linear(c: np.ndarray) -> np.ndarray:
+    """Canonical sRGB EOTF (IEC 61966-2-1) -> linear radiance."""
+    c = np.asarray(c, dtype=np.float64)
+    return np.where(c <= 0.04045, c / 12.92, ((c + 0.055) / 1.055) ** 2.4)
+
+
+def psnr(pred: np.ndarray, target: np.ndarray) -> float:
+    """PSNR in sRGB space (dB). Returns inf on an exact match."""
+    mse = float(np.mean((np.asarray(pred, np.float64) - np.asarray(target, np.float64)) ** 2))
+    if mse <= 0.0:
+        return float('inf')
+    return 10.0 * np.log10(1.0 / mse)
+
+
+def psnr_linear(pred: np.ndarray, target: np.ndarray) -> float:
+    """PSNR on linear radiance (dB) -- the domain the model reconstructs in."""
+    mse = float(np.mean((_srgb_to_linear(pred) - _srgb_to_linear(target)) ** 2))
+    if mse <= 0.0:
+        return float('inf')
+    return 10.0 * np.log10(1.0 / mse)
+
+
+def ssim_score(pred: np.ndarray, target: np.ndarray):
+    """SSIM index (higher = better). None if scikit-image is unavailable."""
+    try:
+        from skimage.metrics import structural_similarity
+    except Exception:  # noqa: BLE001
+        return None
+    a = np.asarray(pred, dtype=np.float64)
+    b = np.asarray(target, dtype=np.float64)
+    if a.shape != b.shape:
+        return None
+    return float(
+        structural_similarity(
+            a, b, data_range=1.0, channel_axis=-1,
+            gaussian_weights=True, sigma=1.5, use_sample_covariance=False,
+        )
+    )
+
+
+_LPIPS = None
+_LPIPS_ERR = None
+
+
+def lpips_score(pred: np.ndarray, target: np.ndarray):
+    """LPIPS distance (lower = better). None if torch/lpips is unavailable.
+
+    Runs on CPU and is only ever invoked on the sparse logging schedule, so it
+    stays off the JAX/MPS training hot path.
+    """
+    global _LPIPS, _LPIPS_ERR
+    if _LPIPS_ERR is not None:
+        return None
+    if _LPIPS is None:
+        try:
+            import torch  # noqa: F401
+            import lpips
+            _LPIPS = lpips.LPIPS(net='alex', verbose=False).eval()
+            for p in _LPIPS.parameters():
+                p.requires_grad_(False)
+        except Exception as e:  # noqa: BLE001
+            _LPIPS_ERR = str(e)
+            return None
+    import torch
+    x = torch.from_numpy(np.asarray(pred)[None].transpose(0, 3, 1, 2).astype('float32')) * 2.0 - 1.0
+    y = torch.from_numpy(np.asarray(target)[None].transpose(0, 3, 1, 2).astype('float32')) * 2.0 - 1.0
+    with torch.no_grad():
+        d = _LPIPS(x, y)
+    return float(d.item())
+
+
 def largest_valid_region_square(matrix: np.ndarray) -> tuple:
     """Find the largest square region of zeros in a binary matrix.
 
@@ -124,6 +195,14 @@ class LocalProgressLogger:
         self.ns_cm_list = []
         self.ns_ip_list = []
 
+        # Reconstruction-quality tracking (mean over the test set, per logged
+        # step). Populated in log_progress from the unwarped predictions.
+        self.eval_steps_list = []
+        self.psnr_list = []
+        self.psnr_lin_list = []
+        self.ssim_list = []
+        self.lpips_list = []
+
         # Cached jitted unwarp. Compiling once is what makes unwarping affordable:
         # run eagerly the pipeline (nested vmap of RealNVP.inverse over a full
         # res*res grid + per-channel map_coordinates) materializes every
@@ -179,8 +258,16 @@ class LocalProgressLogger:
 
         if not simulating_tetra and self.num_test_images > 0:
             # Simulate retina + cortex on test images
-            pred_internal_percept_sRGB = self._run_inference(retina, cortex)
+            pred_internal_percept_sRGB, crop_box = self._run_inference(retina, cortex)
             pred_internal_percept_sRGB = np.clip(pred_internal_percept_sRGB, 0, 1)
+
+            # --- Reconstruction-quality metrics on the unwarped predictions ---
+            # Targets are cropped to the same largest-valid square the
+            # predictions were cropped to, so PSNR/SSIM/LPIPS compare aligned
+            # content (and exclude the distorted warped borders).
+            self._log_eval_metrics(
+                pred_internal_percept_sRGB, crop_box, num_gradient_updates
+            )
 
             # Plot side-by-side comparisons
             for image_id, image in enumerate(pred_internal_percept_sRGB):
@@ -198,11 +285,13 @@ class LocalProgressLogger:
                 plt.savefig(os.path.join(self.log_dir, f'IP{image_id}', f'{num_gradient_updates}.png'))
                 plt.close()
 
-    def _run_inference(self, retina, cortex) -> np.ndarray:
+    def _run_inference(self, retina, cortex):
         """Run retina + cortex inference on test images one at a time.
 
         Processes each test image individually to avoid memory overflow.
-        Returns predicted internal percept in sRGB space, shape (N, H, W, 3).
+        Returns ``(predictions, crop_box)`` where ``predictions`` is the
+        unwarped internal percept in sRGB space, shape (N, h, w, 3), cropped to
+        the largest valid square ``crop_box = (y0, x0, y1, x1)``.
         """
         import gc
         results = []
@@ -276,7 +365,97 @@ class LocalProgressLogger:
             del test_ons, warped_ip, warped_linsRGB, warped_sRGB, warped_chw, unwarped_sRGB, pred
             gc.collect()
 
-        return np.stack(results, axis=0)
+        return np.stack(results, axis=0), crop_box
+
+    def _log_eval_metrics(self, preds: np.ndarray, crop_box, num_gradient_updates: int):
+        """Compute + persist PSNR/SSIM/LPIPS for the unwarped predictions.
+
+        Writes one JSON line per logged step to ``eval_metrics.jsonl`` (per-image
+        and mean values) and refreshes ``eval_metrics.png`` with the curves over
+        training so reconstruction quality is tracked alongside the loss.
+        """
+        y0, x0, y1, x1 = crop_box
+        per_image = []
+        for i, pred in enumerate(preds):
+            target = np.clip(self.test_images[i][y0:y1, x0:x1], 0.0, 1.0)
+            pred = np.clip(pred, 0.0, 1.0)
+            per_image.append({
+                'psnr': psnr(pred, target),
+                'psnr_lin': psnr_linear(pred, target),
+                'ssim': ssim_score(pred, target),
+                'lpips': lpips_score(pred, target),
+            })
+
+        def _mean(field):
+            vals = [m[field] for m in per_image if m[field] is not None and np.isfinite(m[field])]
+            return float(np.mean(vals)) if vals else None
+
+        mean_psnr = _mean('psnr')
+        mean_psnr_lin = _mean('psnr_lin')
+        mean_ssim = _mean('ssim')
+        mean_lpips = _mean('lpips')
+
+        record = {
+            'step': num_gradient_updates,
+            'mean_psnr': mean_psnr,
+            'mean_psnr_lin': mean_psnr_lin,
+            'mean_ssim': mean_ssim,
+            'mean_lpips': mean_lpips,
+            'per_image': per_image,
+        }
+        with open(os.path.join(self.log_dir, 'eval_metrics.jsonl'), 'a', encoding='utf-8') as f:
+            f.write(json.dumps(record) + '\n')
+
+        self.eval_steps_list.append(num_gradient_updates)
+        self.psnr_list.append(mean_psnr)
+        self.psnr_lin_list.append(mean_psnr_lin)
+        self.ssim_list.append(mean_ssim)
+        self.lpips_list.append(mean_lpips)
+
+        def _fmt(v, suffix=''):
+            return f'{v:.4f}{suffix}' if v is not None else 'n/a'
+
+        print(
+            f"  [eval @ {num_gradient_updates}] "
+            f"PSNR {_fmt(mean_psnr, ' dB')} | PSNR-lin {_fmt(mean_psnr_lin, ' dB')} | "
+            f"SSIM {_fmt(mean_ssim)} | LPIPS {_fmt(mean_lpips)}"
+        )
+
+        # Curves: PSNR (left axis) and SSIM/LPIPS (right axis), masking n/a.
+        def _series(values):
+            xs = [s for s, v in zip(self.eval_steps_list, values) if v is not None]
+            ys = [v for v in values if v is not None]
+            return xs, ys
+
+        fig, ax = plt.subplots(figsize=(10, 5))
+        ax2 = ax.twinx()
+        plotted = False
+        for values, label, color, axis in [
+            (self.psnr_list, 'PSNR (dB)', 'crimson', ax),
+            (self.psnr_lin_list, 'PSNR-lin (dB)', 'darkorange', ax),
+        ]:
+            xs, ys = _series(values)
+            if xs:
+                axis.plot(xs, ys, 'o-', color=color, label=label)
+                plotted = True
+        for values, label, color in [
+            (self.ssim_list, 'SSIM', 'steelblue'),
+            (self.lpips_list, 'LPIPS', 'seagreen'),
+        ]:
+            xs, ys = _series(values)
+            if xs:
+                ax2.plot(xs, ys, 's--', color=color, alpha=0.8, label=label)
+                plotted = True
+        if plotted:
+            ax.set_xlabel('Number of Gradient Updates')
+            ax.set_ylabel('PSNR (dB)')
+            ax2.set_ylabel('SSIM / LPIPS')
+            lines = ax.get_lines() + ax2.get_lines()
+            ax.legend(lines, [l.get_label() for l in lines], loc='best', fontsize=8)
+            ax.set_title('Reconstruction quality vs training step')
+            fig.tight_layout()
+            fig.savefig(os.path.join(self.log_dir, 'eval_metrics.png'))
+        plt.close(fig)
 
     def generate_progress_video(self):
         """Generate GIF progress videos from logged snapshots."""

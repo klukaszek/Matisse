@@ -3,9 +3,10 @@ import jax
 import jax.numpy as jnp
 import equinox as eqx
 from jaxtyping import Array, Float
-from typing import Tuple, Optional
+from typing import Tuple, Optional, Union
 
 from .EM_Default import DefaultEyeMotion
+from .EM_Fixational import FixationalEyeMotion
 from .FV_spatial_sampling import DefaultSpatialSampling
 from .SS_spectral_sampling import DefaultSpectralSampling
 from .LI_Default import DefaultLateralInhibition
@@ -20,7 +21,7 @@ class RetinaModel(eqx.Module):
     to optic nerve signals, including eye movements, spatial sampling,
     spectral sampling, lateral inhibition, and spike conversion.
     """
-    EyeMotion: DefaultEyeMotion
+    EyeMotion: Union[DefaultEyeMotion, FixationalEyeMotion]
     SpatialSampling: DefaultSpatialSampling
     SpectralSampling: DefaultSpectralSampling
     LateralInhibition: DefaultLateralInhibition
@@ -38,6 +39,8 @@ class RetinaModel(eqx.Module):
         simulating_tetra: bool = False,
         cone_fundamentals_params: Optional[dict] = None,
         cone_gain_adaptation: str = 'none',
+        eye_motion_type: str = 'Default',
+        eye_motion_params: Optional[dict] = None,
         root_dir: Optional[str] = None
     ):
         """Initialize retina model.
@@ -50,13 +53,32 @@ class RetinaModel(eqx.Module):
             cone_distribution_type: Type of cone spatial distribution
             simulating_tetra: Whether simulating tetrachromacy
             cone_fundamentals_params: Peak wavelengths for tetrachromacy
+            eye_motion_type: Eye-motion generator, 'Default' (uniform random
+                walk) or 'Fixational' (ocular drift + microsaccades)
+            eye_motion_params: Extra keyword params forwarded to the selected
+                eye-motion generator (e.g. drift_std, microsaccade_rate)
             root_dir: Root directory for loading data files
         """
-        # Initialize all submodules
-        self.EyeMotion = DefaultEyeMotion(
-            timesteps_per_image=timesteps_per_image,
-            max_shift_size=max_shift_size
-        )
+        # Initialize all submodules. The eye-motion generator is selectable:
+        # 'Default' draws i.i.d. uniform jumps; 'Fixational' produces
+        # literature-aligned ocular drift + microsaccades.
+        em_params = dict(eye_motion_params or {})
+        if eye_motion_type == 'Fixational':
+            self.EyeMotion = FixationalEyeMotion(
+                timesteps_per_image=timesteps_per_image,
+                max_shift_size=max_shift_size,
+                **em_params,
+            )
+        elif eye_motion_type in ('Default', None):
+            self.EyeMotion = DefaultEyeMotion(
+                timesteps_per_image=timesteps_per_image,
+                max_shift_size=max_shift_size
+            )
+        else:
+            raise ValueError(
+                f"Unknown eye_motion_type '{eye_motion_type}' "
+                "(use 'Default' or 'Fixational')"
+            )
 
         self.SpatialSampling = DefaultSpatialSampling(
             simulation_size=simulation_size,

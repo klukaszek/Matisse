@@ -97,11 +97,12 @@ class NTIRE(GrainDataset):
         """
         super().__init__(params, retina)
 
-        # Calculate required image dimension
-        dim_image = (
-            retina.required_image_resolution +
-            (params['Experiment']['timesteps_per_image'] - 1) *
-            2 * params['RetinaModel']['max_shift_size']
+        # Calculate required image dimension. The eye-motion policy owns this:
+        # the uniform walk needs (T-1)*max_shift_size of travel, but bounded
+        # fixational drift only needs max_shift_size regardless of T, so this no
+        # longer inflates the cached crops when timesteps are increased.
+        dim_image = retina.EyeMotion.required_full_field(
+            retina.required_image_resolution
         )
 
         self.dataset_name = params['Dataset']['dataset_name']

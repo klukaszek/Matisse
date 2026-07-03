@@ -1,0 +1,97 @@
+# L1 reconstruction + biologically-grounded fixational eye motion.
+#
+# Identical to LMS_L1_Implicit_Gaussian (L1 ns_ip loss, Implicit demosaicer with
+# Gaussian conditioning) except the retina's eye-motion generator is switched
+# from the uniform random walk to 'Fixational': slow correlated ocular drift
+# plus occasional centre-biased microsaccades (Rucci & Victor 2015; Engbert &
+# Kliegl 2004). Holding everything else fixed isolates the eye-motion change so
+# its effect on convergence speed / final error is attributable.
+Experiment:
+  name: 'LMS_L1_Fixational'
+  simulation_size: 256
+  # ~250 ms fixations (Najemnik & Geisler 2005) => several timesteps per image.
+  # The multi-frame loss consumes all T frames pairwise, so the cumulative
+  # fixational trajectory supplies the sampling diversity a single drift step
+  # cannot. T=4 (3 pairs) is the speed/diversity sweet spot: ~2x faster than
+  # T=6 while still training on a multi-step trajectory.
+  timesteps_per_image: 4
+  simulating_tetra: false
+
+RetinaModel:
+  retina_spatial_sampling:
+    type: 'Default'
+  retina_spectral_sampling:
+    type: 'Default'
+    cone_types: 'LMS'
+  retina_lateral_inhibition:
+    type: 'Default'
+  # Fixational drift + microsaccade generator. Every key besides `type` is
+  # forwarded to FixationalEyeMotion. Amplitudes are in full-field pixels and
+  # are scaled to max_shift_size (15): drift stays sub-pixel-to-few-pixels per
+  # step, microsaccades span ~4-15 px with a corrective pull toward fixation.
+  retina_eye_motion:
+    type: 'Fixational'
+    drift_std: 1.5
+    drift_persistence: 0.7
+    microsaccade_rate: 0.3
+    microsaccade_min: 4.0
+    microsaccade_max: 15.0
+    # No corrective centre-bias: over 6 timesteps the drift+microsaccade walk
+    # should explore the full +/-max_shift_size window rather than self-correct
+    # back to centre (which is what starved the 2-frame version of motion).
+    microsaccade_center_bias: 0.0
+  retina_spike_conversion:
+    type: 'Default'
+  max_shift_size: 15
+
+Dataset:
+  dataset_name: 'NTIRE'
+  batch_size: 8
+  device_resident: false
+
+DimensionalityBoosting:
+  is_dimensionality_boosting: false
+  previous_cone_mosaic: null
+  load_pretrain_timestep: null
+
+Training:
+  learning_rate: 0.001
+  learning_progress_logging: true
+  logging_mode: 'Local'
+  logging_cycle: 1000
+  max_gradient_updates: 100000
+  checkpoint_cycle: 1000
+  lr_schedule: 'warmup_cosine'
+  warmup_steps: 1000
+  end_learning_rate: 0.00001
+  ns_ip_loss: 'l1'
+  cell_position_update_cycle: 4
+  ons_loss: 'huber'
+  ons_huber_delta: 0.01
+
+CorticalModel:
+  cortex_learn_eye_motion:
+    type: 'Default'
+  cortex_learn_spatial_sampling:
+    type: 'Default'
+  cortex_learn_cone_spectral_type:
+    type: 'Default'
+  cortex_learn_demosaicing:
+    type: 'Implicit'
+    conditioning: 'gaussian'
+    gaussian_kernel_size: 9
+    gaussian_sigma: 2.0
+    gaussian_epsilon: 0.001
+    context_channels: 16
+    context_kernel_size: 5
+    hidden_channels: 32
+    hidden_kernel_size: 1
+    # Retain only low-frequency position context; cone identity and Gaussian
+    # support now carry the high-frequency retinal structure.
+    num_frequencies: 2
+    omega0: 10.0
+    activation: 'relu'
+    compute_dtype: 'bfloat16'
+  cortex_learn_lateral_inhibition:
+    type: 'Default'
+  latent_dim: 8

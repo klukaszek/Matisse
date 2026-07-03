@@ -58,12 +58,11 @@ retina = RetinaModel(
 )
 print(f"✓ Required image resolution: {retina.required_image_resolution}")
 
-# Calculate expected data size (only full_LMS, no pre-cached crops)
-dim_image = (
-    retina.required_image_resolution +
-    (params['Experiment']['timesteps_per_image'] - 1) *
-    2 * params['RetinaModel']['max_shift_size']
-)
+# Calculate expected data size (only full_LMS, no pre-cached crops). The
+# eye-motion policy owns the field size: bounded fixational drift needs only
+# max_shift_size of margin regardless of timesteps, so raising T no longer
+# inflates the cache (the uniform walk still requests (T-1)*max_shift_size).
+dim_image = retina.EyeMotion.required_full_field(retina.required_image_resolution)
 
 # 900 source images, each ~ (482, 512, 4) float32 = ~4MB
 # After interpolation: (482, 512, 301) -> LMS (482, 512, 4) = ~4MB each

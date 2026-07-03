@@ -140,22 +140,23 @@ def prepare_batch(
     accelerators a host sync) every step. Doing it all in one compiled function
     removes that boundary and lets XLA fuse the transposes into the conversion.
 
-    Returns (ons1, ons2, warped_linsRGB1, true_dxy).
+    Returns (batch_ons, warped_linsRGB1, true_dxy) where batch_ons has shape
+    (B, T, 1, H, W) -- every eye-motion timestep, consumed pairwise by the
+    multi-frame reconstruction loss. warped_linsRGB1 is the frame-0 warped image
+    used as the ns_ip RGB probe target.
     """
     # (B, H, W, 4) -> (B, 4, H, W)
     batch_LMS_full = jnp.transpose(batch_LMS_full_field, (0, 3, 1, 2))
 
     batch_ons, batch_true_dxy, batch_warped_LMS = retina(batch_LMS_full, key=key)
 
-    ons1 = batch_ons[:, 0]
-    ons2 = batch_ons[:, 1]
     warped_LMS1 = batch_warped_LMS[:, 0]
 
     # LMS -> linear sRGB (CST works channel-last)
     warped_linsRGB1 = retina.CST.LMS_to_linsRGB(jnp.transpose(warped_LMS1, (0, 2, 3, 1)))
     warped_linsRGB1 = jnp.transpose(warped_linsRGB1, (0, 3, 1, 2))
 
-    return ons1, ons2, warped_linsRGB1, batch_true_dxy
+    return batch_ons, warped_linsRGB1, batch_true_dxy
 
 
 def masked_latent_consistency_loss(
@@ -186,8 +187,7 @@ def train_step(
     cortex: CortexModel,
     opt_states: OptimizerStates,
     optimizers: Tuple[optax.GradientTransformation, ...],
-    ons1: jax.Array,
-    ons2: jax.Array,
+    batch_ons: jax.Array,
     linsRGB1: jax.Array,
     true_dxy: jax.Array,
     cone_mosaic: jax.Array,
@@ -234,76 +234,97 @@ def train_step(
                 cell_position,
             )
 
-        if model.temporal_fusion == 'oracle':
-            pred_dxy = true_dxy
-            pred_warped_ip2, mask2 = model.decode_fused(
-                ons1, ons2, true_dxy[:, 0, :]
-            )
-            # The standalone frame-1 decode only feeds the auxiliary RGB
-            # probe. Avoid paying for it on steps where that probe is frozen.
-            warped_ip1 = (
-                model.decode(ons1)
-                if update_neural_scope
-                else pred_warped_ip2
-            )
-        else:
-            # Reuse this decode for both the temporal objective and RGB probe.
-            warped_ip1 = model.decode(ons1)
-            pred_dxy = model.M_global_movement(
-                ons1, ons2, cell_position, true_dxy
-            )
-            pred_warped_ip2, mask2 = cell_position.efficient_warping(
-                warped_ip1,
-                pred_dxy[:, 0, :],
-            )
-        ons2_pred = model.encode(pred_warped_ip2)
+        # Multi-frame objective over consecutive timestep pairs. The eye is
+        # always moving, so each pair (t, t+1) is a self-supervision constraint:
+        # decode frame t, warp its percept by the inter-frame eye motion,
+        # re-encode, and match frame t+1's ONS. We warp by the simulated
+        # ground-truth `true_dxy` rather than running the block-matching
+        # M_global_movement estimator: that estimator is a fixed, non-learned
+        # algorithm and was ~half the per-pair cost, yet in training the motion
+        # is something we generate and therefore already know exactly. (The
+        # estimator is left untouched and still runs at multi-frame inference.)
+        # Summing over the trajectory, averaged by the pair count, keeps the
+        # loss scale independent of trajectory length.
+        n_frames = batch_ons.shape[1]
+        n_pairs = n_frames - 1
+        res_half = model.M_global_movement.required_image_resolution / 2
 
-        ons2_crop = ons2[:, :, P:-P, P:-P]
-        ons2_pred_crop = ons2_pred[:, :, P:-P, P:-P]
-        mask2_crop = mask2[:, :, P:-P, P:-P]
+        # Frame-0 decode feeds the ns_ip RGB probe and the first pair's source.
+        warped_ip1 = model.decode(batch_ons[:, 0])
 
-        residual = ons2_pred_crop - ons2_crop
-        reconstruction_penalty = ons_reconstruction_penalty(
-            residual,
-            loss_kind=ons_loss_kind,
-            huber_delta=ons_huber_delta,
-        )
-        main_loss = jnp.sum(
-            jnp.sum(
-                reconstruction_penalty * mask2_crop,
-                axis=0,
-            ) / (jnp.sum(mask2_crop, axis=0) + 1)
-        )
-        squared_error = (ons2_pred_crop - ons2_crop) ** 2 * mask2_crop
-        normalized_ons_mse = jnp.sum(squared_error) / jnp.maximum(
-            jnp.sum(mask2_crop), 1.0
-        )
-        movement_mae_pixels = jnp.mean(
-            jnp.abs(pred_dxy - true_dxy)
-        ) * (model.M_global_movement.required_image_resolution / 2)
-        valid_mask_fraction = jnp.mean(mask2_crop)
+        main_loss = jnp.array(0.0)
+        normalized_ons_mse = jnp.array(0.0)
+        valid_mask_fraction = jnp.array(0.0)
+        latent_consistency_loss = jnp.array(0.0)
 
-        # The ONS reconstruction above only observes the local projection of
-        # the latent percept selected by the cone mosaic. Enforce equivariance
-        # across eye movements in every latent channel so the decoder cannot
-        # hide unstable structure in directions that the encoder does not see.
-        if latent_consistency_weight:
-            consistency_batch_size = (
-                ons2.shape[0]
-                if latent_consistency_batch_size <= 0
-                else min(latent_consistency_batch_size, ons2.shape[0])
+        for t in range(n_pairs):
+            ons_a = batch_ons[:, t]
+            ons_b = batch_ons[:, t + 1]
+            dxy_t = true_dxy[:, t, :]
+
+            if model.temporal_fusion == 'oracle':
+                pred_warped_ip, mask = model.decode_fused(ons_a, ons_b, dxy_t)
+            else:
+                warped_ip_a = warped_ip1 if t == 0 else model.decode(ons_a)
+                pred_warped_ip, mask = cell_position.efficient_warping(
+                    warped_ip_a, dxy_t
+                )
+            ons_b_pred = model.encode(pred_warped_ip)
+
+            ons_b_crop = ons_b[:, :, P:-P, P:-P]
+            ons_b_pred_crop = ons_b_pred[:, :, P:-P, P:-P]
+            mask_crop = mask[:, :, P:-P, P:-P]
+
+            residual = ons_b_pred_crop - ons_b_crop
+            reconstruction_penalty = ons_reconstruction_penalty(
+                residual,
+                loss_kind=ons_loss_kind,
+                huber_delta=ons_huber_delta,
             )
-            ip2 = model.decode(ons2[:consistency_batch_size])
-            ip2_crop = ip2[:, :, P:-P, P:-P]
-            pred_ip2_crop = pred_warped_ip2[
-                :consistency_batch_size, :, P:-P, P:-P
-            ]
-            consistency_mask = mask2_crop[:consistency_batch_size]
-            latent_consistency_loss = masked_latent_consistency_loss(
-                pred_ip2_crop, ip2_crop, consistency_mask
+            main_loss = main_loss + jnp.sum(
+                jnp.sum(
+                    reconstruction_penalty * mask_crop,
+                    axis=0,
+                ) / (jnp.sum(mask_crop, axis=0) + 1)
             )
-        else:
-            latent_consistency_loss = jnp.array(0.0)
+            squared_error = (ons_b_pred_crop - ons_b_crop) ** 2 * mask_crop
+            normalized_ons_mse = normalized_ons_mse + jnp.sum(squared_error) / jnp.maximum(
+                jnp.sum(mask_crop), 1.0
+            )
+            valid_mask_fraction = valid_mask_fraction + jnp.mean(mask_crop)
+
+            # The ONS reconstruction only observes the local projection of the
+            # latent percept selected by the cone mosaic. Enforce equivariance
+            # across eye movements in every latent channel so the decoder cannot
+            # hide unstable structure in directions the encoder does not see.
+            if latent_consistency_weight:
+                consistency_batch_size = (
+                    ons_b.shape[0]
+                    if latent_consistency_batch_size <= 0
+                    else min(latent_consistency_batch_size, ons_b.shape[0])
+                )
+                ip_b = model.decode(ons_b[:consistency_batch_size])
+                ip_b_crop = ip_b[:, :, P:-P, P:-P]
+                pred_ip_b_crop = pred_warped_ip[
+                    :consistency_batch_size, :, P:-P, P:-P
+                ]
+                consistency_mask = mask_crop[:consistency_batch_size]
+                latent_consistency_loss = latent_consistency_loss + masked_latent_consistency_loss(
+                    pred_ip_b_crop, ip_b_crop, consistency_mask
+                )
+
+        # Average across pairs so the loss scale (and thus LR / grad-norm
+        # expectations) is independent of trajectory length.
+        inv_pairs = 1.0 / n_pairs
+        main_loss = main_loss * inv_pairs
+        normalized_ons_mse = normalized_ons_mse * inv_pairs
+        valid_mask_fraction = valid_mask_fraction * inv_pairs
+        latent_consistency_loss = latent_consistency_loss * inv_pairs
+
+        # Motion is taken as ground truth (no estimator), so this slot now
+        # reports the mean eye-motion magnitude in pixels rather than an
+        # estimator error -- a useful check that the eye is actually moving.
+        movement_mae_pixels = jnp.mean(jnp.abs(true_dxy)) * res_half
 
         objective = main_loss + latent_consistency_weight * latent_consistency_loss
         aux = (
@@ -474,6 +495,15 @@ def train_cortical_model(
     cortical_cfg = params.get('CorticalModel', params.get('CortexModel', {}))
     demosaicing_cfg = cortical_cfg.get('cortex_learn_demosaicing', {})
 
+    # Eye-motion policy: read the `retina_eye_motion` block. `type` selects the
+    # generator; every other key is forwarded as a parameter to it (e.g. drift
+    # / microsaccade settings for the Fixational policy).
+    eye_motion_cfg = params['RetinaModel'].get('retina_eye_motion') or {}
+    eye_motion_type = eye_motion_cfg.get('type', 'Default')
+    eye_motion_params = {
+        key: value for key, value in eye_motion_cfg.items() if key != 'type'
+    }
+
     # Retina
     retina = RetinaModel(
         simulation_size=simulation_size,
@@ -488,9 +518,14 @@ def train_cortical_model(
         cone_gain_adaptation=params['RetinaModel']['retina_spectral_sampling'].get(
             'gain_adaptation', 'none'
         ),
+        eye_motion_type=eye_motion_type,
+        eye_motion_params=eye_motion_params,
         root_dir=root_dir
     )
-    print(f"✓ Retina initialized (image resolution: {retina.required_image_resolution})")
+    print(
+        f"✓ Retina initialized (image resolution: {retina.required_image_resolution}, "
+        f"eye_motion={type(retina.EyeMotion).__name__})"
+    )
 
     # Cortex
     key, subkey = jax.random.split(key)
@@ -669,14 +704,14 @@ def train_cortical_model(
 
             # Retina forward + slice + CST, fused into one jitted kernel.
             key, subkey = jax.random.split(key)
-            batch_ons1, batch_ons2, batch_warped_linsRGB1, batch_true_dxy = prepare_batch(
+            batch_ons, batch_warped_linsRGB1, batch_true_dxy = prepare_batch(
                 retina, batch_LMS_full_field, subkey
             )
 
             # Cortex Train Step
             cortex, opt_states, losses = train_step(
                 cortex, opt_states, optimizers,
-                batch_ons1, batch_ons2, batch_warped_linsRGB1,
+                batch_ons, batch_warped_linsRGB1,
                 batch_true_dxy, true_cone_mosaic, true_LI_kernel_size,
                 simulating_tetra,
                 ns_ip_loss_kind=training_cfg.get('ns_ip_loss', 'l2'),

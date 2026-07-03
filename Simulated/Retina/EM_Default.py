@@ -25,6 +25,15 @@ class DefaultEyeMotion(eqx.Module):
         self.timesteps_per_image = timesteps_per_image
         self.max_shift_size = max_shift_size
 
+    def required_full_field(self, resolution: int) -> int:
+        """Full-field size the dataset must supply for this policy.
+
+        The uniform walk can shift up to ``max_shift_size`` on each of the T-1
+        steps, so it may travel ``(T-1) * max_shift_size`` from centre in either
+        direction; the field must be large enough that no crop runs off-image.
+        """
+        return resolution + (self.timesteps_per_image - 1) * 2 * self.max_shift_size
+
     def __call__(
         self,
         LMS_full_field: Float[Array, "batch channels height width"],

@@ -25,3 +25,6 @@ dependencies = [
     "lpips>=0.1.4",
     "torchvision>=0.19.0",
 ]
+
+[tool.marimo.runtime]
+output_max_bytes = 1_000_000_000
